@@ -80,14 +80,19 @@ def scan_word_document(word_file, excel_file, question_limit):
                     # Increment the processed question count and check if we've reached the limit
                     questions_processed += 1
                     if questions_processed >= question_limit:
-                        doc.save("updated_" + word_file.name)
-                        return "Processing complete."
+                        # Save the document to an in-memory buffer
+                        output_buffer = BytesIO()
+                        doc.save(output_buffer)
+                        output_buffer.seek(0)
+                        return output_buffer, "Processing complete."
         else:
             st.write(f"Table skipped due to missing required columns: {headers}")
 
-    # Save the modified document to the same file
-    doc.save("updated_" + word_file.name)
-    return "Processing complete."
+    # Save the document to an in-memory buffer
+    output_buffer = BytesIO()
+    doc.save(output_buffer)
+    output_buffer.seek(0)
+    return output_buffer, "Processing complete."
 
 # Streamlit app logic
 st.title("Document Processor")
@@ -98,12 +103,12 @@ excel_file = st.file_uploader("Upload Excel Document", type=["xlsx"])
 if word_file and excel_file:
     question_limit = st.number_input("How many questions would you like to process?", min_value=1, value=5)
     if st.button("Process"):
-        output = scan_word_document(BytesIO(word_file.read()), BytesIO(excel_file.read()), question_limit)
-        st.write(output)
+        output_buffer, output_message = scan_word_document(BytesIO(word_file.read()), BytesIO(excel_file.read()), question_limit)
+        st.write(output_message)
         st.success("Processing complete. Download the updated Word document below.")
-        with open("updated_" + word_file.name, "rb") as file:
-            btn = st.download_button(
-                label="Download updated document",
-                data=file,
-                file_name="updated_" + word_file.name
-            )
+        st.download_button(
+            label="Download updated document",
+            data=output_buffer,
+            file_name="updated_document.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
