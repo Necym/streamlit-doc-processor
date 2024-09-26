@@ -12,7 +12,16 @@ def extract_prompt_answers_and_explanation(row):
     # Split the text into prompt and answers
     parts = re.split(r'(?=\bA\.)', question_text, maxsplit=1)
     prompt = parts[0].strip()
-    answers = re.split(r'\n(?=[A-Z]\.)', parts[1].strip()) if len(parts) > 1 else []
+    
+    # Remove the labels (A., B., C., D.) from the answers
+    answers = []
+    if len(parts) > 1:
+        raw_answers = re.split(r'\n(?=[A-Z]\.)', parts[1].strip())
+        for answer in raw_answers:
+            # Remove the answer label (e.g., A., B., C., D.)
+            clean_answer = re.sub(r'^[A-Z]\.\s*', '', answer).strip()
+            answers.append(clean_answer)
+    
     return prompt, answers, explanation
 
 # Function to scan the Word document and replace translation with the question prompt, answers, and explanation
