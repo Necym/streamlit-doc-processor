@@ -4,11 +4,7 @@ from docx import Document
 import re
 from io import BytesIO
 
-# ───────────────────────────── Globals ─────────────────────────────
-# We'll set this from the UI before calling any processor.
-SHEET_NAME_SELECTED = None
-
-# ─────────────────────── Helpers: header detection ───────────────────────
+# ───────────────────────── Helpers: header detection / normalization ─────────────────────────
 
 def _norm(s: str) -> str:
     """
@@ -37,7 +33,7 @@ def _get_header_indices(header_cells):
                 break
     return idx if len(idx) == 4 else None
 
-# ───────────────────── Excel parsing (unchanged behavior) ─────────────────────
+# ───────────────────────── Excel parsing (unchanged behavior) ─────────────────────────
 
 def extract_prompt_answers_and_explanation(df_row):
     """
@@ -62,7 +58,7 @@ def extract_prompt_answers_and_explanation(df_row):
 
     return prompt, answers, explanation
 
-# ───────────────────── Core processor (Type-anchored, row-only fix) ─────────────────────
+# ───────────────────────── Core processor (Type-anchored, row-only fix) ─────────────────────────
 
 def scan_word_document_version_qp(word_file, excel_file, sheet_name, question_limit):
     """
@@ -167,27 +163,23 @@ def scan_word_document_version_qp(word_file, excel_file, sheet_name, question_li
     out.seek(0)
     return out, f"Processed {q_count} question(s) with sheet '{sheet_name}'."
 
-# ───────────────────── Back-compat wrappers (Option B) ─────────────────────
+# ───────────────────────── Back-compat wrappers (Option A / Option B) ─────────────────────────
 
-def scan_word_document_version_a(word_file, excel_file, question_limit):
+def scan_word_document_version_a(word_file, excel_file, sheet_name, question_limit):
     """
-    Backward-compatible alias for old 'Version A'.
-    Uses the sheet name the user typed in the UI (SHEET_NAME_SELECTED),
-    falling back to 'Simulated' if not set.
+    Backward-compatible alias for old 'Version A' UI choice.
+    Now uses the Type-anchored row logic, with user-specified sheet.
     """
-    sheet = SHEET_NAME_SELECTED or "Simulated"
-    return scan_word_document_version_qp(word_file, excel_file, sheet, question_limit)
+    return scan_word_document_version_qp(word_file, excel_file, sheet_name, question_limit)
 
-def scan_word_document_version_b(word_file, excel_file, question_limit):
+def scan_word_document_version_b(word_file, excel_file, sheet_name, question_limit):
     """
-    Backward-compatible alias for old 'Version B'.
-    Uses the sheet name the user typed in the UI (SHEET_NAME_SELECTED),
-    falling back to 'Simulated' if not set.
+    Backward-compatible alias for old 'Version B' UI choice.
+    Now uses the Type-anchored row logic, with user-specified sheet.
     """
-    sheet = SHEET_NAME_SELECTED or "Simulated"
-    return scan_word_document_version_qp(word_file, excel_file, sheet, question_limit)
+    return scan_word_document_version_qp(word_file, excel_file, sheet_name, question_limit)
 
-# ───────────────────────────── Streamlit UI ─────────────────────────────
+# ───────────────────────── Streamlit UI (keeps A/B options) ─────────────────────────
 
 st.title("Document Processor")
 
@@ -209,18 +201,19 @@ if word_file and excel_file and st.button("Process"):
     word_bytes = word_file.read()
     excel_bytes = excel_file.read()
 
-    # Store the selected sheet name for wrappers A/B
-    global SHEET_NAME_SELECTED
-    SHEET_NAME_SELECTED = sheet_name_input
-
     try:
         if version_choice == "Version A":
-            output_buffer, output_message = scan_word_document_version_a(BytesIO(word_bytes), BytesIO(excel_bytes), question_limit)
+            output_buffer, output_message = scan_word_document_version_a(
+                BytesIO(word_bytes), BytesIO(excel_bytes), sheet_name_input, question_limit
+            )
         elif version_choice == "Version B":
-            output_buffer, output_message = scan_word_document_version_b(BytesIO(word_bytes), BytesIO(excel_bytes), question_limit)
+            output_buffer, output_message = scan_word_document_version_b(
+                BytesIO(word_bytes), BytesIO(excel_bytes), sheet_name_input, question_limit
+            )
         else:
-            # Direct call for the explicit QP option
-            output_buffer, output_message = scan_word_document_version_qp(BytesIO(word_bytes), BytesIO(excel_bytes), sheet_name_input, question_limit)
+            output_buffer, output_message = scan_word_document_version_qp(
+                BytesIO(word_bytes), BytesIO(excel_bytes), sheet_name_input, question_limit
+            )
 
         st.write(output_message)
         st.success("Processing complete. Download the updated Word document below.")
