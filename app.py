@@ -72,30 +72,32 @@ def get_feedback_value(df_row, feedback_column_name: str):
     # Fallback
     return str(df_row.get('Explanation', '') or '')
 
-# ───────────────────────── Universal processor (config-driven) ─────────────────────────
+# ───────────────────────── Universal processor (anchor + configurable offsets) ─────────────────────────
 
 def scan_word_document_universal(word_file,
                                  excel_file,
                                  sheet_name: str,
                                  anchor_type_value: str,
                                  anchor_keyword: str,
+                                 prompt_offset: int,
                                  answer_offset: int,
                                  explanation_offset: int,
                                  question_limit: int,
                                  feedback_column_name: str = 'Explanation'):
     """
     Universal mapping:
-      - Anchor on rows where Type matches 'anchor_type_value' (normalized exact match).
+      - Find anchor rows where Type matches 'anchor_type_value' (normalized exact match).
       - If 'anchor_keyword' is provided, ALSO require that Source Text contains it (case-insensitive).
-      - Fill PROMPT at the anchor row's Translation.
-      - Fill ANSWERS starting at row (i + answer_offset), one answer per subsequent row.
-      - Fill FEEDBACK/EXPLANATION at row (i + explanation_offset) using the chosen Excel column.
-      - Map questions sequentially: the first anchor -> Excel row 1, second -> Excel row 2, etc.
-      - Never overwrite the next anchor: if a target row is another anchor, stop for that block.
+      - PROMPT at:         row (anchor + prompt_offset)
+      - ANSWERS start at:  row (anchor + answer_offset), then consecutive rows for each answer
+      - FEEDBACK at:       row (anchor + explanation_offset), from Excel column 'feedback_column_name'
+      - Questions map sequentially: the first anchor -> Excel row 1, second -> row 2, ...
+      - Only writes to Translation column.
+      - Safeguard: don't overwrite the next anchor (except when writing prompt to the anchor itself if prompt_offset == 0).
     """
-    # Validate offsets
-    if answer_offset < 1 or explanation_offset < 1:
-        raise RuntimeError("Offsets must be positive integers (>= 1).")
+    # Validate offsets (allow zero for prompt; answers/feedback may also be zero if desired)
+    if prompt_offset < 0 or answer_offset < 0 or explanation_offset < 0:
+        raise RuntimeError("Offsets must be non-negative integers (>= 0).")
 
     # Load Excel
     try:
@@ -103,12 +105,10 @@ def scan_word_document_universal(word_file,
     except ValueError as e:
         raise RuntimeError(f"Excel sheet '{sheet_name}' was not found.") from e
 
-    # Require expected Excel columns
     if 'Question' not in df.columns:
         raise RuntimeError("Excel sheet must contain a 'Question' column.")
-    # 'Explanation' may be replaced by another column; we check in get_feedback_value
 
-    # Load Word document
+    # Load Word
     doc = Document(word_file)
 
     # Find the localization table & columns
@@ -137,9 +137,7 @@ def scan_word_document_universal(word_file,
     def put_translation(row_obj, text):
         row_obj.cells[col['translation']].text = text
 
-    # Normalize the configured anchor value once
     anchor_norm = _norm(anchor_type_value)
-
     total_rows = len(table.rows)
     q_count = 0
     i = 1  # skip header row
@@ -147,47 +145,56 @@ def scan_word_document_universal(word_file,
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, source_text, _ = get_vals(table.rows[i])
         if _norm(type_text) == anchor_norm:
-            # Optional keyword validation against Source Text (case-insensitive)
+            # Optional keyword validation (Source Text contains keyword, case-insensitive)
             if anchor_keyword and anchor_keyword.strip():
                 if anchor_keyword.lower() not in source_text.lower():
                     i += 1
                     continue
 
-            # Sequential Excel mapping
+            # Map to Excel row (1-based)
             q_index = q_count + 1
             df_row = df.iloc[q_index - 1]
             excel_prompt, excel_answers, _excel_expl = extract_prompt_answers_and_explanation(df_row)
             feedback_text = get_feedback_value(df_row, feedback_column_name)
 
-            # PROMPT → anchor row
-            put_translation(table.rows[i], excel_prompt)
+            last_written = i  # track the farthest row we wrote to (to advance safely)
 
-            # ANSWERS → start at i + answer_offset (i.e., "how many rows after the prompt is the first answer?")
-            # Fill answers consecutively; stop if we hit another anchor or run out of rows
+            # ── PROMPT ──
+            p_idx = i + prompt_offset
+            if 0 <= p_idx < total_rows:
+                # Allow writing to anchor itself (prompt_offset == 0), but prevent writing onto the NEXT anchor
+                _, t_p, _, _ = get_vals(table.rows[p_idx])
+                if p_idx == i or _norm(t_p) != anchor_norm:
+                    put_translation(table.rows[p_idx], excel_prompt)
+                    last_written = max(last_written, p_idx)
+
+            # ── ANSWERS ──
             for a_idx, ans in enumerate(excel_answers):
-                target_idx = i + answer_offset + a_idx
-                if target_idx >= total_rows:
+                tgt = i + answer_offset + a_idx
+                if not (0 <= tgt < total_rows):
                     break
-                _, t_candidate, _, _ = get_vals(table.rows[target_idx])
-                if _norm(t_candidate) == anchor_norm:
-                    # Next question encountered; stop filling answers for this block
+                _, t_tgt, _, _ = get_vals(table.rows[tgt])
+                # Do not overwrite the next anchor
+                if tgt != i and _norm(t_tgt) == anchor_norm:
                     break
-                put_translation(table.rows[target_idx], ans)
+                put_translation(table.rows[tgt], ans)
+                last_written = max(last_written, tgt)
 
-            # FEEDBACK/EXPLANATION → at i + explanation_offset (if not hitting next anchor)
+            # ── FEEDBACK / EXPLANATION ──
             f_idx = i + explanation_offset
-            if f_idx < total_rows:
-                _, t_feedback, _, _ = get_vals(table.rows[f_idx])
-                if _norm(t_feedback) != anchor_norm:
+            if 0 <= f_idx < total_rows:
+                _, t_f, _, _ = get_vals(table.rows[f_idx])
+                if f_idx == i or _norm(t_f) != anchor_norm:
                     put_translation(table.rows[f_idx], feedback_text)
+                    last_written = max(last_written, f_idx)
 
             q_count += 1
-            # Move forward so we don't re-process the same area forever
-            i = max(i + 1, i + explanation_offset + 1)
+            # Advance beyond what we wrote (at least move one row)
+            i = max(last_written + 1, i + 1)
         else:
             i += 1
 
-    # Return updated document
+    # Return updated .docx
     out = BytesIO()
     doc.save(out)
     out.seek(0)
@@ -197,18 +204,18 @@ def scan_word_document_universal(word_file,
 
 st.title("Document Processor — Universal (Config-Driven)")
 
-# Inputs for Excel
+# Excel tab name
 sheet_name_input = st.text_input(
     "Excel sheet/tab name",
     value="1Q1",
     help="Type the exact tab name in your Excel file (e.g., 1Q1)."
 )
 
-# Config inputs for locating rows in Word
+# Config: anchor finding
 anchor_type_value = st.text_input(
-    "Anchor Type value (exact text under the Type column that marks a question start)",
+    "Anchor Type value (exact text under the Type column that marks a question block)",
     value="Question Prompt",
-    help='Example: "Question Prompt"'
+    help='Example: "Question Prompt" or any Type label that reliably appears per question.'
 )
 
 anchor_keyword = st.text_input(
@@ -217,18 +224,26 @@ anchor_keyword = st.text_input(
     help="Leave blank to skip keyword validation."
 )
 
+# Offsets (relative to the ANCHOR row)
+prompt_offset = st.number_input(
+    "Rows after ANCHOR where the PROMPT lives",
+    min_value=0,
+    value=0,
+    help="0 means the prompt is on the anchor row; 2 means at i+2, etc."
+)
+
 answer_offset = st.number_input(
-    "How many rows after the anchor is the FIRST answer?",
-    min_value=1,
+    "Rows after ANCHOR where the FIRST ANSWER lives",
+    min_value=0,
     value=1,
-    help="Example: 1 → first answer at i+1; 3 → first answer at i+3."
+    help="1 means first answer at i+1, then i+2, i+3..."
 )
 
 explanation_offset = st.number_input(
-    "How many rows after the anchor is the EXPLANATION / FEEDBACK row?",
-    min_value=1,
+    "Rows after ANCHOR where the EXPLANATION / FEEDBACK lives",
+    min_value=0,
     value=6,
-    help="Example: 6 → explanation/feedback at i+6."
+    help="6 means explanation/feedback at i+6."
 )
 
 feedback_column_name = st.text_input(
@@ -237,11 +252,11 @@ feedback_column_name = st.text_input(
     help="Use 'Explanation' (default) or another column name like 'Correct'."
 )
 
-# File uploads
+# Files
 word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
 excel_file = st.file_uploader("Upload Excel Document (.xlsx)", type=["xlsx"])
 
-# Processing controls
+# Controls
 question_limit = st.number_input(
     "How many questions would you like to process?",
     min_value=1,
@@ -258,6 +273,7 @@ if word_file and excel_file and st.button("Process"):
             sheet_name_input,
             anchor_type_value,
             anchor_keyword,
+            int(prompt_offset),
             int(answer_offset),
             int(explanation_offset),
             int(question_limit),
