@@ -34,14 +34,14 @@ def _get_header_indices(header_cells):
                 break
     return idx if len(idx) == 4 else None
 
-# ───────────────────────── Excel parsing (kept like your old code) ─────────────────────────
+# ───────────────────────── Excel parsing (same behavior as your old code) ─────────────────────────
 
 def extract_prompt_answers_and_explanation(df_row):
     """
     Original behavior:
       - Prompt is everything before the first 'A.' in df['Question']
       - Answers are split on newlines with labels A./B./C./...
-      - Explanation comes from df['Explanation']
+      - Explanation comes from df['Explanation'] (or other column if chosen)
     """
     question_text = str(df_row['Question'])
     explanation = str(df_row.get('Explanation', '') or '')
@@ -59,33 +59,59 @@ def extract_prompt_answers_and_explanation(df_row):
 
     return prompt, answers, explanation
 
-def get_correct_feedback(df_row):
+def get_feedback_value(df_row, feedback_column_name: str):
     """
-    For Version B: prefer a dedicated 'Correct'/'Correct Feedback' column if present,
-    otherwise fall back to 'Explanation'.
+    Returns the desired feedback text from the chosen Excel column.
+    Defaults to 'Explanation' when the specified column is missing/empty.
     """
-    candidates = ['Correct', 'Correct Feedback', 'CorrectFeedback', 'Correct_Explanation', 'CorrectFeedbackText']
-    for c in candidates:
-        if c in df_row.index:
-            val = str(df_row.get(c, '') or '')
-            if val.strip():
-                return val
+    col = (feedback_column_name or 'Explanation').strip()
+    if col in df_row.index:
+        val = str(df_row.get(col, '') or '')
+        if val.strip():
+            return val
+    # Fallback
     return str(df_row.get('Explanation', '') or '')
 
-# ───────────────────────── Core processors (Type-anchored, row-only fixes) ─────────────────────────
+# ───────────────────────── Universal processor (config-driven) ─────────────────────────
 
-def scan_word_document_version_a(word_file, excel_file, sheet_name, question_limit):
+def scan_word_document_universal(word_file,
+                                 excel_file,
+                                 sheet_name: str,
+                                 anchor_type_value: str,
+                                 anchor_keyword: str,
+                                 answer_offset: int,
+                                 explanation_offset: int,
+                                 question_limit: int,
+                                 feedback_column_name: str = 'Explanation'):
     """
-    Version A: Fill Prompt, Answers, and EXPLANATION ('Rounded Rectangular Caption').
+    Universal mapping:
+      - Anchor on rows where Type matches 'anchor_type_value' (normalized exact match).
+      - If 'anchor_keyword' is provided, ALSO require that Source Text contains it (case-insensitive).
+      - Fill PROMPT at the anchor row's Translation.
+      - Fill ANSWERS starting at row (i + answer_offset), one answer per subsequent row.
+      - Fill FEEDBACK/EXPLANATION at row (i + explanation_offset) using the chosen Excel column.
+      - Map questions sequentially: the first anchor -> Excel row 1, second -> Excel row 2, etc.
+      - Never overwrite the next anchor: if a target row is another anchor, stop for that block.
     """
+    # Validate offsets
+    if answer_offset < 1 or explanation_offset < 1:
+        raise RuntimeError("Offsets must be positive integers (>= 1).")
+
+    # Load Excel
     try:
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
     except ValueError as e:
         raise RuntimeError(f"Excel sheet '{sheet_name}' was not found.") from e
 
+    # Require expected Excel columns
+    if 'Question' not in df.columns:
+        raise RuntimeError("Excel sheet must contain a 'Question' column.")
+    # 'Explanation' may be replaced by another column; we check in get_feedback_value
+
+    # Load Word document
     doc = Document(word_file)
 
-    # Locate localization table and columns
+    # Find the localization table & columns
     table = None
     col = None
     for t in doc.tables:
@@ -111,187 +137,132 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
     def put_translation(row_obj, text):
         row_obj.cells[col['translation']].text = text
 
-    total_rows = len(table.rows)
-    q_count = 0
-    i = 1  # skip header row
-
-    while i < total_rows and q_count < question_limit and q_count < len(df):
-        _, type_text, _, _ = get_vals(table.rows[i])
-        if _norm(type_text) == 'questionprompt':
-            q_index = q_count + 1
-            excel_prompt, excel_answers, excel_explanation = extract_prompt_answers_and_explanation(df.iloc[q_index - 1])
-
-            # PROMPT
-            put_translation(table.rows[i], excel_prompt)
-
-            # ANSWERS: next up to 4 Radio Button ... Normal state
-            answers_needed = min(4, len(excel_answers))
-            answers_filled = 0
-            j = 1
-            while answers_filled < answers_needed and (i + j) < total_rows:
-                _, t_next, _, _ = get_vals(table.rows[i + j])
-                tnorm = _norm(t_next)
-                if tnorm == 'questionprompt':
-                    break
-                if tnorm.startswith('radiobutton') and tnorm.endswith('normalstate'):
-                    put_translation(table.rows[i + j], excel_answers[answers_filled])
-                    answers_filled += 1
-                j += 1
-
-            # EXPLANATION: first Rounded Rectangular Caption after answers; skip copyright
-            k = i + j
-            while k < total_rows:
-                _, t_k, _, _ = get_vals(table.rows[k])
-                tknorm = _norm(t_k)
-                if tknorm == 'copyright':
-                    k += 1
-                    continue
-                if tknorm == 'roundedrectangularcaption':
-                    put_translation(table.rows[k], excel_explanation)
-                    k += 1
-                    break
-                if tknorm == 'questionprompt':
-                    break
-                k += 1
-
-            q_count += 1
-            i = max(k, i + j, i + 1)
-        else:
-            i += 1
-
-    out = BytesIO()
-    doc.save(out)
-    out.seek(0)
-    return out, f"Processed {q_count} question(s) [Version A] with sheet '{sheet_name}'."
-
-def scan_word_document_version_b(word_file, excel_file, sheet_name, question_limit):
-    """
-    Version B: Fill Prompt, Answers, and CORRECT FEEDBACK (second Text Box after answers).
-    """
-    try:
-        df = pd.read_excel(excel_file, sheet_name=sheet_name)
-    except ValueError as e:
-        raise RuntimeError(f"Excel sheet '{sheet_name}' was not found.") from e
-
-    doc = Document(word_file)
-
-    # Locate localization table and columns
-    table = None
-    col = None
-    for t in doc.tables:
-        if not t.rows:
-            continue
-        idx = _get_header_indices(t.rows[0].cells)
-        if idx:
-            table = t
-            col = idx
-            break
-    if table is None:
-        raise RuntimeError("No table with headers [ID, Type, Source Text, Translation] found.")
-
-    def get_vals(row_obj):
-        cells = row_obj.cells
-        return (
-            cells[col['id']].text.strip(),
-            cells[col['type']].text.strip(),
-            cells[col['sourcetext']].text.strip(),
-            cells[col['translation']].text.strip()
-        )
-
-    def put_translation(row_obj, text):
-        row_obj.cells[col['translation']].text = text
+    # Normalize the configured anchor value once
+    anchor_norm = _norm(anchor_type_value)
 
     total_rows = len(table.rows)
     q_count = 0
     i = 1  # skip header row
 
     while i < total_rows and q_count < question_limit and q_count < len(df):
-        _, type_text, _, _ = get_vals(table.rows[i])
-        if _norm(type_text) == 'questionprompt':
-            q_index = q_count + 1
-            excel_prompt, excel_answers, _excel_expl = extract_prompt_answers_and_explanation(df.iloc[q_index - 1])
-            correct_feedback = get_correct_feedback(df.iloc[q_index - 1])
+        _, type_text, source_text, _ = get_vals(table.rows[i])
+        if _norm(type_text) == anchor_norm:
+            # Optional keyword validation against Source Text (case-insensitive)
+            if anchor_keyword and anchor_keyword.strip():
+                if anchor_keyword.lower() not in source_text.lower():
+                    i += 1
+                    continue
 
-            # PROMPT
+            # Sequential Excel mapping
+            q_index = q_count + 1
+            df_row = df.iloc[q_index - 1]
+            excel_prompt, excel_answers, _excel_expl = extract_prompt_answers_and_explanation(df_row)
+            feedback_text = get_feedback_value(df_row, feedback_column_name)
+
+            # PROMPT → anchor row
             put_translation(table.rows[i], excel_prompt)
 
-            # ANSWERS: next up to 4 Radio Button ... Normal state
-            answers_needed = min(4, len(excel_answers))
-            answers_filled = 0
-            j = 1
-            while answers_filled < answers_needed and (i + j) < total_rows:
-                _, t_next, _, _ = get_vals(table.rows[i + j])
-                tnorm = _norm(t_next)
-                if tnorm == 'questionprompt':
+            # ANSWERS → start at i + answer_offset (i.e., "how many rows after the prompt is the first answer?")
+            # Fill answers consecutively; stop if we hit another anchor or run out of rows
+            for a_idx, ans in enumerate(excel_answers):
+                target_idx = i + answer_offset + a_idx
+                if target_idx >= total_rows:
                     break
-                if tnorm.startswith('radiobutton') and tnorm.endswith('normalstate'):
-                    put_translation(table.rows[i + j], excel_answers[answers_filled])
-                    answers_filled += 1
-                j += 1
-
-            # CORRECT FEEDBACK:
-            # After answers, skip copyright rows, then find two consecutive Text Box rows:
-            #   first is the "Correct!" label, second is the feedback we should overwrite.
-            k = i + j
-            label_found = False
-            while k < total_rows:
-                _, t_k, _, _ = get_vals(table.rows[k])
-                tknorm = _norm(t_k)
-
-                if tknorm == 'questionprompt':  # next question -> stop block
+                _, t_candidate, _, _ = get_vals(table.rows[target_idx])
+                if _norm(t_candidate) == anchor_norm:
+                    # Next question encountered; stop filling answers for this block
                     break
-                if tknorm == 'copyright':
-                    k += 1
-                    continue
-                if tknorm == 'textbox':
-                    if not label_found:
-                        label_found = True  # this is the "Correct!" label row
-                    else:
-                        # this is the second Text Box -> the Correct feedback row
-                        put_translation(table.rows[k], correct_feedback)
-                        k += 1
-                        break
-                k += 1
+                put_translation(table.rows[target_idx], ans)
+
+            # FEEDBACK/EXPLANATION → at i + explanation_offset (if not hitting next anchor)
+            f_idx = i + explanation_offset
+            if f_idx < total_rows:
+                _, t_feedback, _, _ = get_vals(table.rows[f_idx])
+                if _norm(t_feedback) != anchor_norm:
+                    put_translation(table.rows[f_idx], feedback_text)
 
             q_count += 1
-            i = max(k, i + j, i + 1)
+            # Move forward so we don't re-process the same area forever
+            i = max(i + 1, i + explanation_offset + 1)
         else:
             i += 1
 
+    # Return updated document
     out = BytesIO()
     doc.save(out)
     out.seek(0)
-    return out, f"Processed {q_count} question(s) [Version B] with sheet '{sheet_name}'."
+    return out, f"Processed {q_count} question(s) with sheet '{sheet_name}'."
 
-# ───────────────────────── Streamlit UI (keeps Option A / Option B) ─────────────────────────
+# ───────────────────────── Streamlit UI (Universal) ─────────────────────────
 
-st.title("Document Processor")
+st.title("Document Processor — Universal (Config-Driven)")
 
-version_choice = st.selectbox("Select Version", ["Version A", "Version B"])
-
-# Let the user type the Excel sheet/tab name (e.g., 1Q1)
+# Inputs for Excel
 sheet_name_input = st.text_input(
     "Excel sheet/tab name",
     value="1Q1",
     help="Type the exact tab name in your Excel file (e.g., 1Q1)."
 )
 
-word_file = st.file_uploader("Upload Word Document", type=["docx"])
-excel_file = st.file_uploader("Upload Excel Document", type=["xlsx"])
-question_limit = st.number_input("How many questions would you like to process?", min_value=1, value=10)
+# Config inputs for locating rows in Word
+anchor_type_value = st.text_input(
+    "Anchor Type value (exact text under the Type column that marks a question start)",
+    value="Question Prompt",
+    help='Example: "Question Prompt"'
+)
+
+anchor_keyword = st.text_input(
+    "Optional keyword to validate the anchor in Source Text (case-insensitive)",
+    value="",
+    help="Leave blank to skip keyword validation."
+)
+
+answer_offset = st.number_input(
+    "How many rows after the anchor is the FIRST answer?",
+    min_value=1,
+    value=1,
+    help="Example: 1 → first answer at i+1; 3 → first answer at i+3."
+)
+
+explanation_offset = st.number_input(
+    "How many rows after the anchor is the EXPLANATION / FEEDBACK row?",
+    min_value=1,
+    value=6,
+    help="Example: 6 → explanation/feedback at i+6."
+)
+
+feedback_column_name = st.text_input(
+    "Excel column to use for the final feedback row",
+    value="Explanation",
+    help="Use 'Explanation' (default) or another column name like 'Correct'."
+)
+
+# File uploads
+word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
+excel_file = st.file_uploader("Upload Excel Document (.xlsx)", type=["xlsx"])
+
+# Processing controls
+question_limit = st.number_input(
+    "How many questions would you like to process?",
+    min_value=1,
+    value=10
+)
 
 if word_file and excel_file and st.button("Process"):
     word_bytes = word_file.read()
     excel_bytes = excel_file.read()
     try:
-        if version_choice == "Version A":
-            output_buffer, output_message = scan_word_document_version_a(
-                BytesIO(word_bytes), BytesIO(excel_bytes), sheet_name_input, question_limit
-            )
-        else:  # Version B
-            output_buffer, output_message = scan_word_document_version_b(
-                BytesIO(word_bytes), BytesIO(excel_bytes), sheet_name_input, question_limit
-            )
+        output_buffer, output_message = scan_word_document_universal(
+            BytesIO(word_bytes),
+            BytesIO(excel_bytes),
+            sheet_name_input,
+            anchor_type_value,
+            anchor_keyword,
+            int(answer_offset),
+            int(explanation_offset),
+            int(question_limit),
+            feedback_column_name.strip() or 'Explanation'
+        )
 
         st.write(output_message)
         st.success("Processing complete. Download the updated Word document below.")
