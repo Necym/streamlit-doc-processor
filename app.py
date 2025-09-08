@@ -4,7 +4,7 @@ from docx import Document
 import re
 import json
 from io import BytesIO
-
+  
 # ───────────────────────── Helpers: header detection / normalization ─────────────────────────
 
 def _norm(s: str) -> str:
