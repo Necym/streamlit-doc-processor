@@ -2,28 +2,17 @@ import streamlit as st
 import pandas as pd
 from docx import Document
 import re
+import json
 from io import BytesIO
 
 # ───────────────────────── Helpers: header detection / normalization ─────────────────────────
 
 def _norm(s: str) -> str:
-    """
-    Normalize strings from the Word table to make matching robust.
-    - Lowercase
-    - Remove non-letters (digits, punctuation, spaces, emojis)
-    Examples:
-      "Question Prompt" -> "questionprompt"
-      "Radio Button 1 - Normal state" -> "radiobuttonnormalstate"
-      "copyright 1" -> "copyright"
-      "Text Box" -> "textbox"
-    """
+    """Normalize table labels for robust matching."""
     return re.sub(r'[^a-z]+', '', (s or '').lower())
 
 def _get_header_indices(header_cells):
-    """
-    Find indices for the required columns by normalized label containment.
-    Returns: dict with keys id/type/sourcetext/translation or None if not found.
-    """
+    """Return indices for id/type/sourcetext/translation or None."""
     labels = [_norm(c.text) for c in header_cells]
     need = {'id': 'id', 'type': 'type', 'sourcetext': 'sourcetext', 'translation': 'translation'}
     idx = {}
@@ -37,12 +26,7 @@ def _get_header_indices(header_cells):
 # ───────────────────────── Excel parsing (same behavior as your old code) ─────────────────────────
 
 def extract_prompt_answers_and_explanation(df_row):
-    """
-    Original behavior:
-      - Prompt is everything before the first 'A.' in df['Question']
-      - Answers are split on newlines with labels A./B./C./...
-      - Explanation comes from df['Explanation']
-    """
+    """Old behavior: split df['Question'] at first 'A.'; explanation from df['Explanation']."""
     question_text = str(df_row['Question'])
     explanation = str(df_row.get('Explanation', '') or '')
 
@@ -60,25 +44,17 @@ def extract_prompt_answers_and_explanation(df_row):
     return prompt, answers, explanation
 
 def get_feedback_value(df_row, feedback_column_name: str):
-    """
-    Returns the desired feedback text from the chosen Excel column.
-    Defaults to 'Explanation' when the specified column is missing/empty.
-    """
+    """Use chosen feedback column; fallback to 'Explanation'."""
     col = (feedback_column_name or 'Explanation').strip()
     if col in df_row.index:
         val = str(df_row.get(col, '') or '')
         if val.strip():
             return val
-    # Fallback
     return str(df_row.get('Explanation', '') or '')
 
 # ───────────────────────── Version A (Type-anchored, fills Explanation) ─────────────────────────
 
 def scan_word_document_version_a(word_file, excel_file, sheet_name, question_limit):
-    """
-    Version A: Fill Prompt, Answers, and EXPLANATION ('Rounded Rectangular Caption')
-    using the fixed, Type-anchored sequential mapping.
-    """
     try:
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
     except ValueError as e:
@@ -86,7 +62,6 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
 
     doc = Document(word_file)
 
-    # Locate localization table and columns
     table = None
     col = None
     for t in doc.tables:
@@ -114,7 +89,7 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
 
     total_rows = len(table.rows)
     q_count = 0
-    i = 1  # skip header row
+    i = 1  # skip header
 
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, _, _ = get_vals(table.rows[i])
@@ -122,10 +97,10 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
             q_index = q_count + 1
             excel_prompt, excel_answers, excel_explanation = extract_prompt_answers_and_explanation(df.iloc[q_index - 1])
 
-            # PROMPT
+            # Prompt
             put_translation(table.rows[i], excel_prompt)
 
-            # ANSWERS: next up to 4 Radio Button ... Normal state
+            # Answers (next up to 4 "Radio Button ... Normal state")
             answers_needed = min(4, len(excel_answers))
             answers_filled = 0
             j = 1
@@ -139,7 +114,7 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
                     answers_filled += 1
                 j += 1
 
-            # EXPLANATION: first Rounded Rectangular Caption after answers; skip copyright
+            # Explanation (first "Rounded Rectangular Caption" after answers; skip copyright)
             k = i + j
             while k < total_rows:
                 _, t_k, _, _ = get_vals(table.rows[k])
@@ -168,9 +143,6 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
 # ───────────────────────── Version B (Type-anchored, fills Correct feedback) ─────────────────────────
 
 def scan_word_document_version_b(word_file, excel_file, sheet_name, question_limit):
-    """
-    Version B: Fill Prompt, Answers, and CORRECT FEEDBACK (second Text Box after answers).
-    """
     try:
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
     except ValueError as e:
@@ -178,7 +150,6 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
 
     doc = Document(word_file)
 
-    # Locate localization table and columns
     table = None
     col = None
     for t in doc.tables:
@@ -206,7 +177,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
 
     total_rows = len(table.rows)
     q_count = 0
-    i = 1  # skip header row
+    i = 1  # skip header
 
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, _, _ = get_vals(table.rows[i])
@@ -215,10 +186,10 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
             excel_prompt, excel_answers, _excel_expl = extract_prompt_answers_and_explanation(df.iloc[q_index - 1])
             correct_feedback = get_feedback_value(df.iloc[q_index - 1], 'Correct')
 
-            # PROMPT
+            # Prompt
             put_translation(table.rows[i], excel_prompt)
 
-            # ANSWERS: next up to 4 Radio Button ... Normal state
+            # Answers
             answers_needed = min(4, len(excel_answers))
             answers_filled = 0
             j = 1
@@ -232,9 +203,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     answers_filled += 1
                 j += 1
 
-            # CORRECT FEEDBACK:
-            # After answers, skip copyright rows, then find two consecutive Text Box rows:
-            #   first is the "Correct!" label, second is the feedback we should overwrite.
+            # Correct feedback: skip copyright; then two Text Box rows ("Correct!" label, then feedback)
             k = i + j
             label_found = False
             while k < total_rows:
@@ -248,9 +217,8 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     continue
                 if tknorm == 'textbox':
                     if not label_found:
-                        label_found = True  # the "Correct!" label row
+                        label_found = True
                     else:
-                        # feedback row
                         put_translation(table.rows[k], correct_feedback)
                         k += 1
                         break
@@ -266,7 +234,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
     out.seek(0)
     return out, f"Processed {q_count} question(s) [Version B] with sheet '{sheet_name}'."
 
-# ───────────────────────── Universal (config-driven: anchor + offsets) ─────────────────────────
+# ───────────────────────── Universal (anchor + configurable offsets) ─────────────────────────
 
 def scan_word_document_universal(word_file,
                                  excel_file,
@@ -278,17 +246,6 @@ def scan_word_document_universal(word_file,
                                  explanation_offset: int,
                                  question_limit: int,
                                  feedback_column_name: str = 'Explanation'):
-    """
-    Universal mapping:
-      - Find anchor rows where Type matches 'anchor_type_value' (normalized exact match).
-      - If 'anchor_keyword' is provided, ALSO require that Source Text contains it (case-insensitive).
-      - PROMPT at:         row (anchor + prompt_offset)
-      - ANSWERS start at:  row (anchor + answer_offset), then consecutive rows for each answer
-      - FEEDBACK at:       row (anchor + explanation_offset), from Excel column 'feedback_column_name'
-      - Questions map sequentially: the first anchor -> Excel row 1, second -> row 2, ...
-      - Only writes to Translation column.
-      - Safeguard: don't overwrite the next anchor (except when writing prompt to the anchor itself if prompt_offset == 0).
-    """
     if prompt_offset < 0 or answer_offset < 0 or explanation_offset < 0:
         raise RuntimeError("Offsets must be non-negative integers (>= 0).")
 
@@ -302,7 +259,6 @@ def scan_word_document_universal(word_file,
 
     doc = Document(word_file)
 
-    # Find localization table
     table = None
     col = None
     for t in doc.tables:
@@ -336,13 +292,12 @@ def scan_word_document_universal(word_file,
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, source_text, _ = get_vals(table.rows[i])
         if _norm(type_text) == anchor_norm:
-            # Optional keyword validation (Source Text contains keyword, case-insensitive)
+            # Optional keyword check
             if anchor_keyword and anchor_keyword.strip():
                 if anchor_keyword.lower() not in source_text.lower():
                     i += 1
                     continue
 
-            # Map to Excel row (1-based)
             q_index = q_count + 1
             df_row = df.iloc[q_index - 1]
             excel_prompt, excel_answers, _excel_expl = extract_prompt_answers_and_explanation(df_row)
@@ -350,7 +305,7 @@ def scan_word_document_universal(word_file,
 
             last_written = i
 
-            # PROMPT
+            # Prompt at anchor + offset
             p_idx = i + prompt_offset
             if 0 <= p_idx < total_rows:
                 _, t_p, _, _ = get_vals(table.rows[p_idx])
@@ -358,7 +313,7 @@ def scan_word_document_universal(word_file,
                     put_translation(table.rows[p_idx], excel_prompt)
                     last_written = max(last_written, p_idx)
 
-            # ANSWERS
+            # Answers start at anchor + answer_offset
             for a_idx, ans in enumerate(excel_answers):
                 tgt = i + answer_offset + a_idx
                 if not (0 <= tgt < total_rows):
@@ -369,7 +324,7 @@ def scan_word_document_universal(word_file,
                 put_translation(table.rows[tgt], ans)
                 last_written = max(last_written, tgt)
 
-            # FEEDBACK / EXPLANATION
+            # Feedback/explanation at anchor + explanation_offset
             f_idx = i + explanation_offset
             if 0 <= f_idx < total_rows:
                 _, t_f, _, _ = get_vals(table.rows[f_idx])
@@ -387,106 +342,180 @@ def scan_word_document_universal(word_file,
     out.seek(0)
     return out, f"Processed {q_count} question(s) [Universal] with sheet '{sheet_name}'."
 
-# ───────────────────────── Streamlit UI ─────────────────────────
+# ───────────────────────── Preset helpers ─────────────────────────
 
-st.title("Document Processor — Multi-Version")
+PRESET_SCHEMA_VERSION = 1
 
+def current_config_as_preset():
+    """Collect the current UI state into a preset dict."""
+    return {
+        "name": st.session_state.get("preset_name", "").strip() or "unnamed",
+        "schema_version": PRESET_SCHEMA_VERSION,
+        "mode": st.session_state.get("version_choice", "Version A"),
+        "sheet_name": st.session_state.get("sheet_name_input", "1Q1"),
+        # Universal fields (kept even for A/B; harmless if unused)
+        "anchor_type_value": st.session_state.get("anchor_type_value", "Question Prompt"),
+        "anchor_keyword": st.session_state.get("anchor_keyword", ""),
+        "prompt_offset": int(st.session_state.get("prompt_offset", 0) or 0),
+        "answer_offset": int(st.session_state.get("answer_offset", 1) or 1),
+        "explanation_offset": int(st.session_state.get("explanation_offset", 6) or 6),
+        "feedback_column_name": st.session_state.get("feedback_column_name", "Explanation"),
+    }
+
+def apply_preset_to_state(preset: dict):
+    """Apply a preset into st.session_state and rerun."""
+    if not isinstance(preset, dict):
+        st.error("Invalid preset format.")
+        return
+    # Minimal validation
+    mode = preset.get("mode", "Version A")
+    st.session_state["version_choice"] = mode
+    st.session_state["sheet_name_input"] = preset.get("sheet_name", "1Q1")
+
+    st.session_state["anchor_type_value"] = preset.get("anchor_type_value", "Question Prompt")
+    st.session_state["anchor_keyword"] = preset.get("anchor_keyword", "")
+    st.session_state["prompt_offset"] = int(preset.get("prompt_offset", 0) or 0)
+    st.session_state["answer_offset"] = int(preset.get("answer_offset", 1) or 1)
+    st.session_state["explanation_offset"] = int(preset.get("explanation_offset", 6) or 6)
+    st.session_state["feedback_column_name"] = preset.get("feedback_column_name", "Explanation")
+
+    # Name (optional, for UI)
+    st.session_state["preset_name"] = preset.get("name", "")
+
+    st.rerun()
+
+# Initialize session containers
+if "saved_presets" not in st.session_state:
+    st.session_state["saved_presets"] = {}  # name -> dict
+if "preset_name" not in st.session_state:
+    st.session_state["preset_name"] = ""
+
+# ───────────────────────── UI ─────────────────────────
+
+st.title("Document Processor — Multi-Version with Presets")
+
+# Version selector
 version_choice = st.selectbox(
     "Choose processor",
     ["Version A", "Version B", "Universal"],
+    key="version_choice",
     help="Universal adds configurable anchor/offsets. A and B use fixed row mappings."
 )
 
-# Always: Excel sheet/tab
+# Sheet/tab
 sheet_name_input = st.text_input(
     "Excel sheet/tab name",
-    value="1Q1",
+    value=st.session_state.get("sheet_name_input", "1Q1"),
+    key="sheet_name_input",
     help="Type the exact tab name in your Excel file (e.g., 1Q1)."
 )
 
-# Show Universal-specific config only when selected
+# Universal-only fields
 if version_choice == "Universal":
     st.subheader("Universal Configuration")
-    anchor_type_value = st.text_input(
+    st.text_input(
         "Anchor Type value (exact text under the Type column that marks a question block)",
-        value="Question Prompt",
-        help='Example: "Question Prompt" or any Type label that reliably appears per question.'
+        value=st.session_state.get("anchor_type_value", "Question Prompt"),
+        key="anchor_type_value"
     )
-
-    anchor_keyword = st.text_input(
+    st.text_input(
         "Optional keyword to validate the anchor in Source Text (case-insensitive)",
-        value="",
-        help="Leave blank to skip keyword validation."
+        value=st.session_state.get("anchor_keyword", ""),
+        key="anchor_keyword"
     )
-
-    prompt_offset = st.number_input(
+    st.number_input(
         "Rows after ANCHOR where the PROMPT lives",
         min_value=0,
-        value=0,
-        help="0 means the prompt is on the anchor row; 2 means at i+2, etc."
+        value=int(st.session_state.get("prompt_offset", 0) or 0),
+        key="prompt_offset"
     )
-
-    answer_offset = st.number_input(
+    st.number_input(
         "Rows after ANCHOR where the FIRST ANSWER lives",
         min_value=0,
-        value=1,
-        help="1 means first answer at i+1, then i+2, i+3..."
+        value=int(st.session_state.get("answer_offset", 1) or 1),
+        key="answer_offset"
     )
-
-    explanation_offset = st.number_input(
+    st.number_input(
         "Rows after ANCHOR where the EXPLANATION / FEEDBACK lives",
         min_value=0,
-        value=6,
-        help="6 means explanation/feedback at i+6."
+        value=int(st.session_state.get("explanation_offset", 6) or 6),
+        key="explanation_offset"
     )
-
-    feedback_column_name = st.text_input(
+    st.text_input(
         "Excel column to use for the final feedback row",
-        value="Explanation",
-        help="Use 'Explanation' (default) or another column name like 'Correct'."
+        value=st.session_state.get("feedback_column_name", "Explanation"),
+        key="feedback_column_name"
     )
-else:
-    # Provide dummies so the process block can reference them safely
-    anchor_type_value = ""
-    anchor_keyword = ""
-    prompt_offset = 0
-    answer_offset = 0
-    explanation_offset = 0
-    feedback_column_name = "Explanation"
 
-# Files and controls (common)
+# Presets block (always visible)
+with st.expander("Presets (Save / Load)"):
+    st.caption("💡 Presets saved to *session* appear in the dropdown below. For long-term use, download JSON and re-upload later.")
+    # Save current as preset
+    st.text_input("Preset name", key="preset_name", placeholder="e.g., Storyline-Q1-Universal")
+    cols = st.columns(2)
+    with cols[0]:
+        if st.button("Save to session presets"):
+            preset = current_config_as_preset()
+            st.session_state["saved_presets"][preset["name"]] = preset
+            st.success(f"Saved preset '{preset['name']}' to session.")
+    with cols[1]:
+        # Download current config as JSON
+        preset = current_config_as_preset()
+        json_bytes = json.dumps(preset, indent=2).encode("utf-8")
+        st.download_button(
+            label="Download current preset JSON",
+            data=json_bytes,
+            file_name=f"{preset['name'] or 'preset'}.json",
+            mime="application/json"
+        )
+
+    # Apply a session preset
+    if st.session_state["saved_presets"]:
+        names = sorted(st.session_state["saved_presets"].keys())
+        sel = st.selectbox("Apply a session preset", names, key="apply_preset_select")
+        if st.button("Apply selected preset"):
+            apply_preset_to_state(st.session_state["saved_presets"][sel])
+
+    # Load from uploaded JSON
+    uploaded = st.file_uploader("Load preset JSON", type=["json"], key="preset_uploader")
+    if uploaded:
+        try:
+            data = json.loads(uploaded.getvalue())
+            st.success("Preset loaded. Applying …")
+            apply_preset_to_state(data)
+        except Exception as e:
+            st.error(f"Failed to load preset: {e}")
+
+# Files & controls (common)
 word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
 excel_file = st.file_uploader("Upload Excel Document (.xlsx)", type=["xlsx"])
-question_limit = st.number_input(
-    "How many questions would you like to process?",
-    min_value=1,
-    value=10
-)
+question_limit = st.number_input("How many questions would you like to process?", min_value=1, value=10)
 
+# Process
 if word_file and excel_file and st.button("Process"):
     word_bytes = word_file.read()
     excel_bytes = excel_file.read()
     try:
         if version_choice == "Version A":
             output_buffer, output_message = scan_word_document_version_a(
-                BytesIO(word_bytes), BytesIO(excel_bytes), sheet_name_input, int(question_limit)
+                BytesIO(word_bytes), BytesIO(excel_bytes), st.session_state["sheet_name_input"], int(question_limit)
             )
         elif version_choice == "Version B":
             output_buffer, output_message = scan_word_document_version_b(
-                BytesIO(word_bytes), BytesIO(excel_bytes), sheet_name_input, int(question_limit)
+                BytesIO(word_bytes), BytesIO(excel_bytes), st.session_state["sheet_name_input"], int(question_limit)
             )
         else:
             output_buffer, output_message = scan_word_document_universal(
                 BytesIO(word_bytes),
                 BytesIO(excel_bytes),
-                sheet_name_input,
-                anchor_type_value,
-                anchor_keyword,
-                int(prompt_offset),
-                int(answer_offset),
-                int(explanation_offset),
+                st.session_state["sheet_name_input"],
+                st.session_state.get("anchor_type_value", "Question Prompt"),
+                st.session_state.get("anchor_keyword", ""),
+                int(st.session_state.get("prompt_offset", 0) or 0),
+                int(st.session_state.get("answer_offset", 1) or 1),
+                int(st.session_state.get("explanation_offset", 6) or 6),
                 int(question_limit),
-                feedback_column_name.strip() or 'Explanation'
+                st.session_state.get("feedback_column_name", "Explanation")
             )
 
         st.write(output_message)
