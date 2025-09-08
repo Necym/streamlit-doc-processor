@@ -342,7 +342,7 @@ def scan_word_document_universal(word_file,
     out.seek(0)
     return out, f"Processed {q_count} question(s) [Universal] with sheet '{sheet_name}'."
 
-# ───────────────────────── Preset helpers ─────────────────────────
+# ───────────────────────── Preset helpers (local-only JSON) ─────────────────────────
 
 PRESET_SCHEMA_VERSION = 1
 
@@ -362,37 +362,34 @@ def current_config_as_preset():
         "feedback_column_name": st.session_state.get("feedback_column_name", "Explanation"),
     }
 
-def apply_preset_to_state(preset: dict):
-    """Apply a preset into st.session_state and rerun."""
-    if not isinstance(preset, dict):
-        st.error("Invalid preset format.")
-        return
-    # Minimal validation
-    mode = preset.get("mode", "Version A")
-    st.session_state["version_choice"] = mode
-    st.session_state["sheet_name_input"] = preset.get("sheet_name", "1Q1")
-
-    st.session_state["anchor_type_value"] = preset.get("anchor_type_value", "Question Prompt")
-    st.session_state["anchor_keyword"] = preset.get("anchor_keyword", "")
-    st.session_state["prompt_offset"] = int(preset.get("prompt_offset", 0) or 0)
-    st.session_state["answer_offset"] = int(preset.get("answer_offset", 1) or 1)
-    st.session_state["explanation_offset"] = int(preset.get("explanation_offset", 6) or 6)
-    st.session_state["feedback_column_name"] = preset.get("feedback_column_name", "Explanation")
-
-    # Name (optional, for UI)
-    st.session_state["preset_name"] = preset.get("name", "")
-
+def queue_preset_for_apply(preset: dict):
+    """Store preset to apply on the next run (before widgets are created), then rerun."""
+    st.session_state["pending_preset"] = preset
     st.rerun()
 
-# Initialize session containers
-if "saved_presets" not in st.session_state:
-    st.session_state["saved_presets"] = {}  # name -> dict
-if "preset_name" not in st.session_state:
-    st.session_state["preset_name"] = ""
+# ───────────────────────── One-time preset application (before widgets) ─────────────────────────
+
+# If a preset was loaded in the previous run, apply it now BEFORE we create any widgets.
+pending = st.session_state.pop("pending_preset", None)
+if pending:
+    # Minimal validation + type coercion
+    try:
+        st.session_state["version_choice"] = pending.get("mode", "Version A")
+        st.session_state["sheet_name_input"] = pending.get("sheet_name", "1Q1")
+        st.session_state["anchor_type_value"] = pending.get("anchor_type_value", "Question Prompt")
+        st.session_state["anchor_keyword"] = pending.get("anchor_keyword", "")
+        st.session_state["prompt_offset"] = int(pending.get("prompt_offset", 0) or 0)
+        st.session_state["answer_offset"] = int(pending.get("answer_offset", 1) or 1)
+        st.session_state["explanation_offset"] = int(pending.get("explanation_offset", 6) or 6)
+        st.session_state["feedback_column_name"] = pending.get("feedback_column_name", "Explanation")
+        st.session_state["preset_name"] = pending.get("name", "")
+    except Exception:
+        # If anything goes wrong, just ignore applying to avoid breaking the app.
+        pass
 
 # ───────────────────────── UI ─────────────────────────
 
-st.title("Document Processor — Multi-Version with Presets")
+st.title("Document Processor — Multi-Version with Local Presets")
 
 # Version selector
 version_choice = st.selectbox(
@@ -447,18 +444,13 @@ if version_choice == "Universal":
         key="feedback_column_name"
     )
 
-# Presets block (always visible)
-with st.expander("Presets (Save / Load)"):
-    st.caption("💡 Presets saved to *session* appear in the dropdown below. For long-term use, download JSON and re-upload later.")
-    # Save current as preset
-    st.text_input("Preset name", key="preset_name", placeholder="e.g., Storyline-Q1-Universal")
+# Presets (local only)
+with st.expander("Presets (Download / Load)"):
+    st.caption("Presets are saved locally as JSON. Upload a preset to apply it instantly.")
+    st.text_input("Preset name (used for filename)", key="preset_name", placeholder="e.g., Storyline-Q1-Universal")
+
     cols = st.columns(2)
     with cols[0]:
-        if st.button("Save to session presets"):
-            preset = current_config_as_preset()
-            st.session_state["saved_presets"][preset["name"]] = preset
-            st.success(f"Saved preset '{preset['name']}' to session.")
-    with cols[1]:
         # Download current config as JSON
         preset = current_config_as_preset()
         json_bytes = json.dumps(preset, indent=2).encode("utf-8")
@@ -468,23 +460,15 @@ with st.expander("Presets (Save / Load)"):
             file_name=f"{preset['name'] or 'preset'}.json",
             mime="application/json"
         )
-
-    # Apply a session preset
-    if st.session_state["saved_presets"]:
-        names = sorted(st.session_state["saved_presets"].keys())
-        sel = st.selectbox("Apply a session preset", names, key="apply_preset_select")
-        if st.button("Apply selected preset"):
-            apply_preset_to_state(st.session_state["saved_presets"][sel])
-
-    # Load from uploaded JSON
-    uploaded = st.file_uploader("Load preset JSON", type=["json"], key="preset_uploader")
-    if uploaded:
-        try:
-            data = json.loads(uploaded.getvalue())
-            st.success("Preset loaded. Applying …")
-            apply_preset_to_state(data)
-        except Exception as e:
-            st.error(f"Failed to load preset: {e}")
+    with cols[1]:
+        uploaded = st.file_uploader("Load preset JSON", type=["json"], key="preset_uploader")
+        if uploaded:
+            try:
+                data = json.loads(uploaded.getvalue())
+                st.success("Preset loaded. Applying …")
+                queue_preset_for_apply(data)  # sets pending preset and reruns BEFORE widgets
+            except Exception as e:
+                st.error(f"Failed to load preset: {e}")
 
 # Files & controls (common)
 word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
