@@ -3,8 +3,9 @@ import pandas as pd
 from docx import Document
 import re
 import json
+import hashlib
 from io import BytesIO
-  
+
 # ───────────────────────── Helpers: header detection / normalization ─────────────────────────
 
 def _norm(s: str) -> str:
@@ -23,10 +24,10 @@ def _get_header_indices(header_cells):
                 break
     return idx if len(idx) == 4 else None
 
-# ───────────────────────── Excel parsing (same behavior as your old code) ─────────────────────────
+# ───────────────────────── Excel parsing (same as your original behavior) ─────────────────────────
 
 def extract_prompt_answers_and_explanation(df_row):
-    """Old behavior: split df['Question'] at first 'A.'; explanation from df['Explanation']."""
+    """Split df['Question'] at first 'A.'; explanation from df['Explanation']."""
     question_text = str(df_row['Question'])
     explanation = str(df_row.get('Explanation', '') or '')
 
@@ -100,7 +101,7 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
             # Prompt
             put_translation(table.rows[i], excel_prompt)
 
-            # Answers (next up to 4 "Radio Button ... Normal state")
+            # Answers
             answers_needed = min(4, len(excel_answers))
             answers_filled = 0
             j = 1
@@ -114,7 +115,7 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
                     answers_filled += 1
                 j += 1
 
-            # Explanation (first "Rounded Rectangular Caption" after answers; skip copyright)
+            # Explanation (first 'Rounded Rectangular Caption' after answers; skip copyright)
             k = i + j
             while k < total_rows:
                 _, t_k, _, _ = get_vals(table.rows[k])
@@ -346,50 +347,86 @@ def scan_word_document_universal(word_file,
 
 PRESET_SCHEMA_VERSION = 1
 
+DEFAULTS = {
+    "version_choice": "Version A",
+    "sheet_name_input": "1Q1",
+    "anchor_type_value": "Question Prompt",
+    "anchor_keyword": "",
+    "prompt_offset": 0,
+    "answer_offset": 1,
+    "explanation_offset": 6,
+    "feedback_column_name": "Explanation",
+    "preset_name": ""
+}
+
+def ensure_defaults():
+    for k, v in DEFAULTS.items():
+        st.session_state.setdefault(k, v)
+
+def apply_preset_dict(preset: dict):
+    """Apply preset into session_state (called BEFORE widgets render)."""
+    st.session_state["version_choice"] = preset.get("mode", DEFAULTS["version_choice"])
+    st.session_state["sheet_name_input"] = preset.get("sheet_name", DEFAULTS["sheet_name_input"])
+    st.session_state["anchor_type_value"] = preset.get("anchor_type_value", DEFAULTS["anchor_type_value"])
+    st.session_state["anchor_keyword"] = preset.get("anchor_keyword", DEFAULTS["anchor_keyword"])
+    st.session_state["prompt_offset"] = int(preset.get("prompt_offset", DEFAULTS["prompt_offset"]) or 0)
+    st.session_state["answer_offset"] = int(preset.get("answer_offset", DEFAULTS["answer_offset"]) or 1)
+    st.session_state["explanation_offset"] = int(preset.get("explanation_offset", DEFAULTS["explanation_offset"]) or 6)
+    st.session_state["feedback_column_name"] = preset.get("feedback_column_name", DEFAULTS["feedback_column_name"])
+    st.session_state["preset_name"] = preset.get("name", DEFAULTS["preset_name"])
+
 def current_config_as_preset():
     """Collect the current UI state into a preset dict."""
     return {
         "name": st.session_state.get("preset_name", "").strip() or "unnamed",
         "schema_version": PRESET_SCHEMA_VERSION,
-        "mode": st.session_state.get("version_choice", "Version A"),
-        "sheet_name": st.session_state.get("sheet_name_input", "1Q1"),
-        # Universal fields (kept even for A/B; harmless if unused)
-        "anchor_type_value": st.session_state.get("anchor_type_value", "Question Prompt"),
-        "anchor_keyword": st.session_state.get("anchor_keyword", ""),
-        "prompt_offset": int(st.session_state.get("prompt_offset", 0) or 0),
-        "answer_offset": int(st.session_state.get("answer_offset", 1) or 1),
-        "explanation_offset": int(st.session_state.get("explanation_offset", 6) or 6),
-        "feedback_column_name": st.session_state.get("feedback_column_name", "Explanation"),
+        "mode": st.session_state.get("version_choice", DEFAULTS["version_choice"]),
+        "sheet_name": st.session_state.get("sheet_name_input", DEFAULTS["sheet_name_input"]),
+        "anchor_type_value": st.session_state.get("anchor_type_value", DEFAULTS["anchor_type_value"]),
+        "anchor_keyword": st.session_state.get("anchor_keyword", DEFAULTS["anchor_keyword"]),
+        "prompt_offset": int(st.session_state.get("prompt_offset", DEFAULTS["prompt_offset"]) or 0),
+        "answer_offset": int(st.session_state.get("answer_offset", DEFAULTS["answer_offset"]) or 1),
+        "explanation_offset": int(st.session_state.get("explanation_offset", DEFAULTS["explanation_offset"]) or 6),
+        "feedback_column_name": st.session_state.get("feedback_column_name", DEFAULTS["feedback_column_name"]),
     }
 
-def queue_preset_for_apply(preset: dict):
-    """Store preset to apply on the next run (before widgets are created), then rerun."""
-    st.session_state["pending_preset"] = preset
-    st.rerun()
+# ───────────────────────── Sidebar: Presets FIRST (fast apply) ─────────────────────────
 
-# ───────────────────────── One-time preset application (before widgets) ─────────────────────────
+st.sidebar.header("Presets")
 
-# If a preset was loaded in the previous run, apply it now BEFORE we create any widgets.
-pending = st.session_state.pop("pending_preset", None)
-if pending:
-    # Minimal validation + type coercion
+# One-time defaults
+ensure_defaults()
+
+# Load preset JSON (top of app, so it applies before main widgets)
+uploaded = st.sidebar.file_uploader("Load preset JSON", type=["json"], key="preset_uploader_top")
+if uploaded:
+    raw = uploaded.getvalue()
+    token = hashlib.md5(raw).hexdigest()
+    last = st.session_state.get("last_preset_token")
     try:
-        st.session_state["version_choice"] = pending.get("mode", "Version A")
-        st.session_state["sheet_name_input"] = pending.get("sheet_name", "1Q1")
-        st.session_state["anchor_type_value"] = pending.get("anchor_type_value", "Question Prompt")
-        st.session_state["anchor_keyword"] = pending.get("anchor_keyword", "")
-        st.session_state["prompt_offset"] = int(pending.get("prompt_offset", 0) or 0)
-        st.session_state["answer_offset"] = int(pending.get("answer_offset", 1) or 1)
-        st.session_state["explanation_offset"] = int(pending.get("explanation_offset", 6) or 6)
-        st.session_state["feedback_column_name"] = pending.get("feedback_column_name", "Explanation")
-        st.session_state["preset_name"] = pending.get("name", "")
-    except Exception:
-        # If anything goes wrong, just ignore applying to avoid breaking the app.
-        pass
+        data = json.loads(raw)
+        # Apply only if new, so user edits aren't overridden on every rerun
+        if token != last:
+            apply_preset_dict(data)
+            st.session_state["last_preset_token"] = token
+            st.sidebar.success("Preset applied.")
+    except Exception as e:
+        st.sidebar.error(f"Failed to load preset: {e}")
 
-# ───────────────────────── UI ─────────────────────────
+# Download current preset
+preset = current_config_as_preset()
+st.sidebar.download_button(
+    label="Download current preset JSON",
+    data=json.dumps(preset, indent=2).encode("utf-8"),
+    file_name=f"{preset['name'] or 'preset'}.json",
+    mime="application/json"
+)
 
-st.title("Document Processor — Multi-Version with Local Presets")
+st.sidebar.caption("Presets are local JSON files. Upload to apply instantly.")
+
+# ───────────────────────── Main UI ─────────────────────────
+
+st.title("Document Processor — Multi-Version (Fast Presets)")
 
 # Version selector
 version_choice = st.selectbox(
@@ -443,32 +480,6 @@ if version_choice == "Universal":
         value=st.session_state.get("feedback_column_name", "Explanation"),
         key="feedback_column_name"
     )
-
-# Presets (local only)
-with st.expander("Presets (Download / Load)"):
-    st.caption("Presets are saved locally as JSON. Upload a preset to apply it instantly.")
-    st.text_input("Preset name (used for filename)", key="preset_name", placeholder="e.g., Storyline-Q1-Universal")
-
-    cols = st.columns(2)
-    with cols[0]:
-        # Download current config as JSON
-        preset = current_config_as_preset()
-        json_bytes = json.dumps(preset, indent=2).encode("utf-8")
-        st.download_button(
-            label="Download current preset JSON",
-            data=json_bytes,
-            file_name=f"{preset['name'] or 'preset'}.json",
-            mime="application/json"
-        )
-    with cols[1]:
-        uploaded = st.file_uploader("Load preset JSON", type=["json"], key="preset_uploader")
-        if uploaded:
-            try:
-                data = json.loads(uploaded.getvalue())
-                st.success("Preset loaded. Applying …")
-                queue_preset_for_apply(data)  # sets pending preset and reruns BEFORE widgets
-            except Exception as e:
-                st.error(f"Failed to load preset: {e}")
 
 # Files & controls (common)
 word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
