@@ -204,13 +204,12 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     answers_filled += 1
                 j += 1
 
-            # Correct feedback: skip copyright; then two Text Box rows ("Correct!" label, then feedback)
+            # Correct feedback: skip copyright; then two Text Box rows
             k = i + j
             label_found = False
             while k < total_rows:
                 _, t_k, _, _ = get_vals(table.rows[k])
                 tknorm = _norm(t_k)
-
                 if tknorm == 'questionprompt':
                     break
                 if tknorm == 'copyright':
@@ -218,9 +217,9 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     continue
                 if tknorm == 'textbox':
                     if not label_found:
-                        label_found = True
+                        label_found = True  # "Correct!" label
                     else:
-                        put_translation(table.rows[k], correct_feedback)
+                        put_translation(table.rows[k], correct_feedback)  # feedback row
                         k += 1
                         break
                 k += 1
@@ -293,7 +292,6 @@ def scan_word_document_universal(word_file,
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, source_text, _ = get_vals(table.rows[i])
         if _norm(type_text) == anchor_norm:
-            # Optional keyword check
             if anchor_keyword and anchor_keyword.strip():
                 if anchor_keyword.lower() not in source_text.lower():
                     i += 1
@@ -390,28 +388,36 @@ def current_config_as_preset():
         "feedback_column_name": st.session_state.get("feedback_column_name", DEFAULTS["feedback_column_name"]),
     }
 
-# ───────────────────────── Sidebar: Presets FIRST (fast apply) ─────────────────────────
+# ───────────────────────── Sidebar: Presets FIRST (fast + re-apply) ─────────────────────────
 
 st.sidebar.header("Presets")
 
 # One-time defaults
 ensure_defaults()
 
-# Load preset JSON (top of app, so it applies before main widgets)
+# Load preset JSON (top of app, applies before main widgets)
 uploaded = st.sidebar.file_uploader("Load preset JSON", type=["json"], key="preset_uploader_top")
-if uploaded:
+
+# Clear the last token when no file is selected so remove → re-add will re-apply
+if uploaded is None:
+    st.session_state.pop("last_preset_token", None)
+
+apply_now = st.sidebar.button("Apply/Refresh preset now")
+
+if uploaded is not None:
     raw = uploaded.getvalue()
     token = hashlib.md5(raw).hexdigest()
     last = st.session_state.get("last_preset_token")
-    try:
-        data = json.loads(raw)
-        # Apply only if new, so user edits aren't overridden on every rerun
-        if token != last:
+
+    # Apply if it's a new file OR the user explicitly requests a refresh
+    if (token != last) or apply_now:
+        try:
+            data = json.loads(raw)
             apply_preset_dict(data)
             st.session_state["last_preset_token"] = token
             st.sidebar.success("Preset applied.")
-    except Exception as e:
-        st.sidebar.error(f"Failed to load preset: {e}")
+        except Exception as e:
+            st.sidebar.error(f"Failed to load preset: {e}")
 
 # Download current preset
 preset = current_config_as_preset()
@@ -421,8 +427,7 @@ st.sidebar.download_button(
     file_name=f"{preset['name'] or 'preset'}.json",
     mime="application/json"
 )
-
-st.sidebar.caption("Presets are local JSON files. Upload to apply instantly.")
+st.sidebar.caption("Presets are local JSON files. Upload to apply instantly. Use 'Apply/Refresh' to re-apply the same file.")
 
 # ───────────────────────── Main UI ─────────────────────────
 
