@@ -273,7 +273,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
     out.seek(0)
     return out, f"Processed {q_count} question(s) [Version B] with sheet '{sheet_name}'."
 
-# ───────────────────────── Universal (anchor + configurable offsets; radio-only answers; optional duplicate prompt clearing) ─────────────────────────
+# ───────────────────────── Universal (anchor + configurable offsets; radio-only answers; duplicate prompt handling) ─────────────────────────
 
 def scan_word_document_universal(word_file,
                                  excel_file,
@@ -339,11 +339,11 @@ def scan_word_document_universal(word_file,
         return tnorm.startswith('radiobutton') and tnorm.endswith('normalstate')
 
     def find_block_end(start_idx: int) -> int:
-        """End is the next anchor (RB1) after start_idx, else end of table."""
+        """End is the next anchor (RB1 or configured anchor) after start_idx, else end of table."""
         k = start_idx + 1
         while k < total_rows:
             _, t_k, _, _ = get_vals(table.rows[k])
-            if _norm(t_k) == anchor_norm:  # RB1 of next question
+            if _norm(t_k) == anchor_norm:  # next anchor row
                 return k
             k += 1
         return total_rows
@@ -374,6 +374,7 @@ def scan_word_document_universal(word_file,
             d(f"[U]   Q{q_index}: answers parsed={len(excel_answers)}")
 
             last_written = i
+            local_bump = 0  # +1 bump only if a duplicate prompt is detected
 
             # PROMPT at anchor + offset (can be negative)
             p_idx = i + prompt_offset
@@ -382,7 +383,7 @@ def scan_word_document_universal(word_file,
                 d(f"[U]   Wrote PROMPT at row {p_idx} (offset {prompt_offset})")
                 last_written = max(last_written, p_idx)
 
-                # Optional: remove duplicate Question Prompt row immediately after prompt
+                # Optional: detect & clear duplicate prompt row immediately after prompt
                 if remove_duplicate_prompts and (p_idx + 1) < block_end:
                     _, t_prompt, _, _ = get_vals(table.rows[p_idx])
                     _, t_next, _, _ = get_vals(table.rows[p_idx + 1])
@@ -392,14 +393,16 @@ def scan_word_document_universal(word_file,
                       f"type[next]='{t_next}'→'{t_next_norm}'")
                     if t_next_norm == t_prompt_norm:
                         put_translation(table.rows[p_idx + 1], "")
-                        d(f"[U]   Cleared TRANSLATION at row {p_idx + 1} (duplicate prompt)")
-
+                        local_bump = 1  # bump offsets for this block only
+                        d(f"[U]   Cleared TRANSLATION at row {p_idx + 1} (duplicate prompt); "
+                          f"applying +{local_bump} bump to answers/feedback in this block")
+                        last_written = max(last_written, p_idx + 1)
             else:
                 d(f"[U]   PROMPT target out of bounds or past block end: row {p_idx}")
 
-            # ANSWERS: collect only radio-button rows within the block starting at (i + answer_offset)
+            # ANSWERS: collect only radio-button rows within the block starting at (i + answer_offset + local_bump)
             answer_rows = []
-            k = i + answer_offset
+            k = i + answer_offset + local_bump
             if not (0 <= k < total_rows):
                 d(f"[U]   Answer start out of bounds: row {k}")
             else:
@@ -412,7 +415,7 @@ def scan_word_document_universal(word_file,
                         break
                     k += 1
 
-            d(f"[U]   Answer rows detected: {answer_rows}")
+            d(f"[U]   Answer rows detected (start with bump={local_bump}): {answer_rows}")
 
             for a_idx, ans in enumerate(excel_answers):
                 if a_idx >= len(answer_rows):
@@ -423,11 +426,11 @@ def scan_word_document_universal(word_file,
                 d(f"[U]   Wrote ANSWER {a_idx+1} at row {tgt}")
                 last_written = max(last_written, tgt)
 
-            # FEEDBACK within block
-            f_idx = i + explanation_offset
+            # FEEDBACK within block at (i + explanation_offset + local_bump)
+            f_idx = i + explanation_offset + local_bump
             if 0 <= f_idx < total_rows and f_idx < block_end:
                 put_translation(table.rows[f_idx], feedback_text)
-                d(f"[U]   Wrote FEEDBACK at row {f_idx} (offset {explanation_offset})")
+                d(f"[U]   Wrote FEEDBACK at row {f_idx} (offset {explanation_offset} + bump {local_bump})")
                 last_written = max(last_written, f_idx)
             else:
                 d(f"[U]   FEEDBACK target out of bounds or past block end: row {f_idx}")
@@ -455,7 +458,7 @@ DEFAULTS = {
     "answer_offset": 1,
     "explanation_offset": 6,
     "feedback_column_name": "Explanation",
-    "remove_duplicate_prompts": False,   # NEW default: OFF
+    "remove_duplicate_prompts": False,   # default OFF
     "preset_name": ""
 }
 
@@ -541,7 +544,7 @@ st.sidebar.caption("Presets are local JSON files. Upload to apply instantly. Use
 
 # ───────────────────────── Main UI ─────────────────────────
 
-st.title("Document Processor — Multi-Version (Debug + Dupe-Prompt Option)")
+st.title("Document Processor — Multi-Version (Debug + Dupe-Prompt Option & Bump)")
 
 # Version selector
 version_choice = st.selectbox(
@@ -598,11 +601,17 @@ if version_choice == "Universal":
         key="feedback_column_name"
     )
     st.checkbox(
-        "Remove duplicate Question Prompt row (clear the Translation cell of the duplicate)",
+        "Remove duplicate Question Prompt row (clear the Translation cell of the duplicate) and auto-bump offsets for that block",
         value=bool(st.session_state.get("remove_duplicate_prompts", False)),
         key="remove_duplicate_prompts",
-        help="If checked, and the row immediately after the prompt has the same Type (ignoring digits), its Translation cell will be cleared."
+        help="If checked, and the row immediately after the prompt has the same Type (ignoring digits), its Translation cell will be cleared, and answers/feedback offsets will be bumped by +1 for that block."
     )
+    if st.session_state.get("remove_duplicate_prompts", False):
+        st.warning(
+            "Duplicate prompt handling is ON.\n\n"
+            "When choosing your offsets (prompt/answer/feedback), pick a question block that does NOT contain duplicate prompts. "
+            "If a duplicate is detected inside a block, the app will automatically add +1 to the answer and feedback offsets for that block."
+        )
 
 # Files & controls (common)
 word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
