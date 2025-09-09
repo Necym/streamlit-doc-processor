@@ -9,8 +9,8 @@ from io import BytesIO
 # ───────────────────────── Helpers: header detection / normalization ─────────────────────────
 
 def _norm(s: str) -> str:
-    """Normalize table labels for robust matching (current behavior: drop digits)."""
-    return re.sub(r'[^a-z]+', '', (s or '').lower())
+    """Normalize table labels for robust matching (keep digits so RB1..RB4 stay distinct)."""
+    return re.sub(r'[^a-z0-9]+', '', (s or '').lower())
 
 def _get_header_indices(header_cells):
     """Return indices for id/type/sourcetext/translation or None."""
@@ -376,10 +376,9 @@ def scan_word_document_universal(word_file,
                 _, t_tgt, _, _ = get_vals(table.rows[tgt])
                 tnorm_tgt = _norm(t_tgt)
 
-                # key guard that often causes early stop when digits are stripped
+                # With digits preserved, this only triggers on the RB1 of the NEXT question
                 if tgt != i and tnorm_tgt == anchor_norm:
-                    d(f"[U]   STOP before ANSWER {a_idx+1}: row {tgt} type='{t_tgt}' norm='{tnorm_tgt}' "
-                      f"== anchor_norm (likely RB2/RB3 collapsed)")
+                    d(f"[U]   STOP before ANSWER {a_idx+1}: row {tgt} type='{t_tgt}' norm='{tnorm_tgt}' == anchor_norm (next block)")
                     break
 
                 put_translation(table.rows[tgt], ans)
@@ -389,7 +388,6 @@ def scan_word_document_universal(word_file,
             # Feedback
             f_idx = i + explanation_offset
             if 0 <= f_idx < total_rows:
-                # Note: if f_idx == i and answer_offset == 0, this overwrites Answer 1 (we log it)
                 if f_idx == i and answer_offset == 0 and len(excel_answers) > 0:
                     d(f"[U]   WARNING: feedback row {f_idx} == anchor and answer_offset=0 → feedback will overwrite Answer 1")
                 put_translation(table.rows[f_idx], feedback_text)
@@ -488,130 +486,4 @@ if uploaded is not None:
             st.session_state["last_preset_token"] = token
             st.sidebar.success("Preset applied.")
         except Exception as e:
-            st.sidebar.error(f"Failed to load preset: {e}")
-
-# Download current preset
-preset = current_config_as_preset()
-st.sidebar.download_button(
-    label="Download current preset JSON",
-    data=json.dumps(preset, indent=2).encode("utf-8"),
-    file_name=f"{preset['name'] or 'preset'}.json",
-    mime="application/json"
-)
-st.sidebar.caption("Presets are local JSON files. Upload to apply instantly. Use 'Apply/Refresh' to re-apply the same file.")
-
-# ───────────────────────── Main UI ─────────────────────────
-
-st.title("Document Processor — Multi-Version (Debug Instrumented)")
-
-# Version selector
-version_choice = st.selectbox(
-    "Choose processor",
-    ["Version A", "Version B", "Universal"],
-    key="version_choice",
-    help="Universal adds configurable anchor/offsets. A and B use fixed row mappings."
-)
-
-# Sheet/tab
-sheet_name_input = st.text_input(
-    "Excel sheet/tab name",
-    value=st.session_state.get("sheet_name_input", "1Q1"),
-    key="sheet_name_input",
-    help="Type the exact tab name in your Excel file (e.g., 1Q1)."
-)
-
-# Universal-only fields
-if version_choice == "Universal":
-    st.subheader("Universal Configuration")
-    st.text_input(
-        "Anchor Type value (exact text under the Type column that marks a question block)",
-        value=st.session_state.get("anchor_type_value", "Question Prompt"),
-        key="anchor_type_value"
-    )
-    st.text_input(
-        "Optional keyword to validate the anchor in Source Text (case-insensitive)",
-        value=st.session_state.get("anchor_keyword", ""),
-        key="anchor_keyword"
-    )
-    st.number_input(
-        "Rows after ANCHOR where the PROMPT lives (can be negative)",
-        value=int(st.session_state.get("prompt_offset", 0) or 0),
-        key="prompt_offset"
-    )
-    st.number_input(
-        "Rows after ANCHOR where the FIRST ANSWER lives",
-        min_value=0,
-        value=int(st.session_state.get("answer_offset", 1) or 1),
-        key="answer_offset"
-    )
-    st.number_input(
-        "Rows after ANCHOR where the EXPLANATION / FEEDBACK lives",
-        min_value=0,
-        value=int(st.session_state.get("explanation_offset", 6) or 6),
-        key="explanation_offset"
-    )
-    st.text_input(
-        "Excel column to use for the final feedback row",
-        value=st.session_state.get("feedback_column_name", "Explanation"),
-        key="feedback_column_name"
-    )
-
-# Files & controls (common)
-word_file = st.file_uploader("Upload Word Document (.docx)", type=["docx"])
-excel_file = st.file_uploader("Upload Excel Document (.xlsx)", type=["xlsx"])
-question_limit = st.number_input("How many questions would you like to process?", min_value=1, value=10)
-
-# Process
-if word_file and excel_file and st.button("Process"):
-    # reset debug buffer
-    if DEBUG_ENABLED:
-        DEBUG_LOG.clear()
-        d("=== DEBUG START ===")
-
-    word_bytes = word_file.read()
-    excel_bytes = excel_file.read()
-    try:
-        if version_choice == "Version A":
-            output_buffer, output_message = scan_word_document_version_a(
-                BytesIO(word_bytes), BytesIO(excel_bytes), st.session_state["sheet_name_input"], int(question_limit)
-            )
-        elif version_choice == "Version B":
-            output_buffer, output_message = scan_word_document_version_b(
-                BytesIO(word_bytes), BytesIO(excel_bytes), st.session_state["sheet_name_input"], int(question_limit)
-            )
-        else:
-            output_buffer, output_message = scan_word_document_universal(
-                BytesIO(word_bytes),
-                BytesIO(excel_bytes),
-                st.session_state["sheet_name_input"],
-                st.session_state.get("anchor_type_value", "Question Prompt"),
-                st.session_state.get("anchor_keyword", ""),
-                int(st.session_state.get("prompt_offset", 0) or 0),
-                int(st.session_state.get("answer_offset", 1) or 1),
-                int(st.session_state.get("explanation_offset", 6) or 6),
-                int(question_limit),
-                st.session_state.get("feedback_column_name", "Explanation")
-            )
-
-        st.write(output_message)
-        st.success("Processing complete. Download the updated Word document below.")
-        st.download_button(
-            label="Download updated document",
-            data=output_buffer,
-            file_name="updated_document.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-
-        if DEBUG_ENABLED:
-            with st.expander("Debug log"):
-                st.code("\n".join(DEBUG_LOG) if DEBUG_LOG else "(no debug entries)")
-    except RuntimeError as e:
-        st.error(str(e))
-        if DEBUG_ENABLED:
-            with st.expander("Debug log"):
-                st.code("\n".join(DEBUG_LOG) if DEBUG_LOG else "(no debug entries)")
-    except Exception as e:
-        st.exception(e)
-        if DEBUG_ENABLED:
-            with st.expander("Debug log"):
-                st.code("\n".join(DEBUG_LOG) if DEBUG_LOG else "(no debug entries)")
+            st.sidebar.error(f"Failed to load pr
