@@ -293,6 +293,7 @@ def scan_word_document_universal(word_file,
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, source_text, _ = get_vals(table.rows[i])
         if _norm(type_text) == anchor_norm:
+            # Optional keyword validation
             if anchor_keyword and anchor_keyword.strip():
                 if anchor_keyword.lower() not in source_text.lower():
                     i += 1
@@ -313,16 +314,24 @@ def scan_word_document_universal(word_file,
                     put_translation(table.rows[p_idx], excel_prompt)
                     last_written = max(last_written, p_idx)
 
-            # Answers start at anchor + answer_offset (non-negative)
-            for a_idx, ans in enumerate(excel_answers):
+            # Answers
+            # If first answer should land on the anchor row (answer_offset == 0),
+            # write it explicitly to ensure it isn't skipped by any guard or odd cell state.
+            start_enum_index = 0
+            if answer_offset == 0 and len(excel_answers) > 0:
+                put_translation(table.rows[i], excel_answers[0])
+                last_written = max(last_written, i)
+                start_enum_index = 1  # continue with B./C./D. in the loop below
+
+            for a_idx in range(start_enum_index, len(excel_answers)):
                 tgt = i + answer_offset + a_idx
                 if not (0 <= tgt < total_rows):
                     break
                 _, t_tgt, _, _ = get_vals(table.rows[tgt])
-                # Stop if we hit the next anchor type (digits preserved so RB1 != RB2)
+                # Stop if we hit the next anchor type (digits preserved so RB1 != RB2 within same question)
                 if tgt != i and _norm(t_tgt) == anchor_norm:
                     break
-                put_translation(table.rows[tgt], ans)
+                put_translation(table.rows[tgt], excel_answers[a_idx])
                 last_written = max(last_written, tgt)
 
             # Feedback/explanation at anchor + explanation_offset (non-negative)
