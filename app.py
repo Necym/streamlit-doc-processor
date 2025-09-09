@@ -204,7 +204,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     answers_filled += 1
                 j += 1
 
-            # Correct feedback: skip copyright; then two Text Box rows ("Correct!" label, then feedback)
+            # Correct feedback: skip copyright; then two Text Box rows
             k = i + j
             label_found = False
             while k < total_rows:
@@ -217,9 +217,9 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     continue
                 if tknorm == 'textbox':
                     if not label_found:
-                        label_found = True
+                        label_found = True  # "Correct!" label
                     else:
-                        put_translation(table.rows[k], correct_feedback)
+                        put_translation(table.rows[k], correct_feedback)  # feedback row
                         k += 1
                         break
                 k += 1
@@ -290,14 +290,26 @@ def scan_word_document_universal(word_file,
     q_count = 0
     i = 1  # skip header
 
+    # helper to find end of this block (next anchor of the same type)
+    def find_block_end(start_idx: int) -> int:
+        k = start_idx + 1
+        while k < total_rows:
+            _, t_k, _, _ = get_vals(table.rows[k])
+            if _norm(t_k) == anchor_norm:  # next question's first answer (or next anchor)
+                return k
+            k += 1
+        return total_rows
+
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, source_text, _ = get_vals(table.rows[i])
         if _norm(type_text) == anchor_norm:
-            # Optional keyword check
+            # Optional keyword check against Source Text
             if anchor_keyword and anchor_keyword.strip():
                 if anchor_keyword.lower() not in source_text.lower():
                     i += 1
                     continue
+
+            block_end = find_block_end(i)
 
             q_index = q_count + 1
             df_row = df.iloc[q_index - 1]
@@ -310,32 +322,45 @@ def scan_word_document_universal(word_file,
             p_idx = i + prompt_offset
             if 0 <= p_idx < total_rows:
                 _, t_p, _, _ = get_vals(table.rows[p_idx])
+                # avoid writing prompt onto another anchor of the same type
                 if p_idx == i or _norm(t_p) != anchor_norm:
                     put_translation(table.rows[p_idx], excel_prompt)
                     last_written = max(last_written, p_idx)
 
-            # ====== Answers: start at anchor + answer_offset, but snap forward if it lands on a Question Prompt row ======
-            answer_start = i + answer_offset
-            if 0 <= answer_start < total_rows:
-                _, t_start, _, _ = get_vals(table.rows[answer_start])
-                if _norm(t_start) == 'questionprompt':
-                    answer_start += 1  # move to the first actual answer row
+            # Answers
+            if answer_offset == 0:
+                # Collect answer rows within this question block: Radio Button * - Normal state
+                answer_rows = []
+                k = i  # include the anchor (RB1) as first answer row
+                while k < block_end and len(answer_rows) < len(excel_answers):
+                    _, t_k, _, _ = get_vals(table.rows[k])
+                    tkn = _norm(t_k)
+                    if tkn.startswith('radiobutton') and tkn.endswith('normalstate'):
+                        answer_rows.append(k)
+                    k += 1
 
-            # Write answers
-            for a_idx, ans in enumerate(excel_answers):
-                tgt = answer_start + a_idx
-                if not (0 <= tgt < total_rows):
-                    break
-                _, t_tgt, _, _ = get_vals(table.rows[tgt])
-                # Stop if we hit the next anchor type (digits preserved so RB1 != RB2)
-                if tgt != i and _norm(t_tgt) == anchor_norm:
-                    break
-                put_translation(table.rows[tgt], ans)
-                last_written = max(last_written, tgt)
+                for a_idx, ans in enumerate(excel_answers):
+                    if a_idx >= len(answer_rows):
+                        break
+                    tgt = answer_rows[a_idx]
+                    put_translation(table.rows[tgt], ans)
+                    last_written = max(last_written, tgt)
+            else:
+                # Legacy offset-based behavior (ensure we don't cross into next block)
+                for a_idx, ans in enumerate(excel_answers):
+                    tgt = i + answer_offset + a_idx
+                    if not (0 <= tgt < total_rows) or tgt >= block_end:
+                        break
+                    _, t_tgt, _, _ = get_vals(table.rows[tgt])
+                    # stop if we hit a new anchor of the same type
+                    if tgt != i and _norm(t_tgt) == anchor_norm:
+                        break
+                    put_translation(table.rows[tgt], ans)
+                    last_written = max(last_written, tgt)
 
-            # Feedback/explanation at anchor + explanation_offset (non-negative)
+            # Feedback/explanation at anchor + explanation_offset (non-negative), keep within block
             f_idx = i + explanation_offset
-            if 0 <= f_idx < total_rows:
+            if 0 <= f_idx < total_rows and f_idx < block_end:
                 _, t_f, _, _ = get_vals(table.rows[f_idx])
                 if f_idx == i or _norm(t_f) != anchor_norm:
                     put_translation(table.rows[f_idx], feedback_text)
