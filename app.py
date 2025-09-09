@@ -204,7 +204,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     answers_filled += 1
                 j += 1
 
-            # Correct feedback: skip copyright; then two Text Box rows
+            # Correct feedback: skip copyright; then two Text Box rows ("Correct!" label, then feedback)
             k = i + j
             label_found = False
             while k < total_rows:
@@ -217,9 +217,9 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     continue
                 if tknorm == 'textbox':
                     if not label_found:
-                        label_found = True  # "Correct!" label
+                        label_found = True
                     else:
-                        put_translation(table.rows[k], correct_feedback)  # feedback row
+                        put_translation(table.rows[k], correct_feedback)
                         k += 1
                         break
                 k += 1
@@ -293,7 +293,7 @@ def scan_word_document_universal(word_file,
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, source_text, _ = get_vals(table.rows[i])
         if _norm(type_text) == anchor_norm:
-            # Optional keyword validation
+            # Optional keyword check
             if anchor_keyword and anchor_keyword.strip():
                 if anchor_keyword.lower() not in source_text.lower():
                     i += 1
@@ -314,24 +314,23 @@ def scan_word_document_universal(word_file,
                     put_translation(table.rows[p_idx], excel_prompt)
                     last_written = max(last_written, p_idx)
 
-            # Answers
-            # If first answer should land on the anchor row (answer_offset == 0),
-            # write it explicitly to ensure it isn't skipped by any guard or odd cell state.
-            start_enum_index = 0
-            if answer_offset == 0 and len(excel_answers) > 0:
-                put_translation(table.rows[i], excel_answers[0])
-                last_written = max(last_written, i)
-                start_enum_index = 1  # continue with B./C./D. in the loop below
+            # ====== Answers: start at anchor + answer_offset, but snap forward if it lands on a Question Prompt row ======
+            answer_start = i + answer_offset
+            if 0 <= answer_start < total_rows:
+                _, t_start, _, _ = get_vals(table.rows[answer_start])
+                if _norm(t_start) == 'questionprompt':
+                    answer_start += 1  # move to the first actual answer row
 
-            for a_idx in range(start_enum_index, len(excel_answers)):
-                tgt = i + answer_offset + a_idx
+            # Write answers
+            for a_idx, ans in enumerate(excel_answers):
+                tgt = answer_start + a_idx
                 if not (0 <= tgt < total_rows):
                     break
                 _, t_tgt, _, _ = get_vals(table.rows[tgt])
-                # Stop if we hit the next anchor type (digits preserved so RB1 != RB2 within same question)
+                # Stop if we hit the next anchor type (digits preserved so RB1 != RB2)
                 if tgt != i and _norm(t_tgt) == anchor_norm:
                     break
-                put_translation(table.rows[tgt], excel_answers[a_idx])
+                put_translation(table.rows[tgt], ans)
                 last_written = max(last_written, tgt)
 
             # Feedback/explanation at anchor + explanation_offset (non-negative)
