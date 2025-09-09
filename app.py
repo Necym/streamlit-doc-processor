@@ -38,7 +38,7 @@ def _short(s: str, n: int = 120) -> str:
     s = s or ""
     return (s[:n] + "…") if len(s) > n else s
 
-# ───────────────────────── Excel parsing (same as your original behavior) ─────────────────────────
+# ───────────────────────── Excel parsing (same as original behavior) ─────────────────────────
 
 def extract_prompt_answers_and_explanation(df_row):
     """Split df['Question'] at first 'A.'; explanation from df['Explanation']."""
@@ -269,7 +269,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
     out.seek(0)
     return out, f"Processed {q_count} question(s) [Version B] with sheet '{sheet_name}'."
 
-# ───────────────────────── Universal (anchor + configurable offsets) ─────────────────────────
+# ───────────────────────── Universal (anchor + configurable offsets; radio-only answers) ─────────────────────────
 
 def scan_word_document_universal(word_file,
                                  excel_file,
@@ -282,9 +282,6 @@ def scan_word_document_universal(word_file,
                                  question_limit: int,
                                  feedback_column_name: str = 'Explanation'):
     d(f"[U] Loading Excel sheet: {sheet_name}")
-    # Allow prompt_offset to be negative; keep others non-negative
-    if answer_offset < 0 or explanation_offset < 0:
-        raise RuntimeError("Answer and explanation offsets must be non-negative. Prompt offset may be negative.")
 
     try:
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
@@ -411,8 +408,6 @@ def scan_word_document_universal(word_file,
             # FEEDBACK within block
             f_idx = i + explanation_offset
             if 0 <= f_idx < total_rows and f_idx < block_end:
-                if f_idx == i and (answer_offset == 0):
-                    d(f"[U]   WARNING: feedback row {f_idx} == anchor and answer_offset=0 → feedback may overwrite Answer 1")
                 put_translation(table.rows[f_idx], feedback_text)
                 d(f"[U]   Wrote FEEDBACK at row {f_idx} (offset {explanation_offset})")
                 last_written = max(last_written, f_idx)
@@ -455,9 +450,10 @@ def apply_preset_dict(preset: dict):
     st.session_state["sheet_name_input"] = preset.get("sheet_name", DEFAULTS["sheet_name_input"])
     st.session_state["anchor_type_value"] = preset.get("anchor_type_value", DEFAULTS["anchor_type_value"])
     st.session_state["anchor_keyword"] = preset.get("anchor_keyword", DEFAULTS["anchor_keyword"])
-    st.session_state["prompt_offset"] = int(preset.get("prompt_offset", DEFAULTS["prompt_offset"]) or 0)
-    st.session_state["answer_offset"] = int(preset.get("answer_offset", DEFAULTS["answer_offset"]) or 1)
-    st.session_state["explanation_offset"] = int(preset.get("explanation_offset", DEFAULTS["explanation_offset"]) or 6)
+    # keep 0 as 0
+    st.session_state["prompt_offset"] = int(preset.get("prompt_offset", DEFAULTS["prompt_offset"]))
+    st.session_state["answer_offset"] = int(preset.get("answer_offset", DEFAULTS["answer_offset"]))
+    st.session_state["explanation_offset"] = int(preset.get("explanation_offset", DEFAULTS["explanation_offset"]))
     st.session_state["feedback_column_name"] = preset.get("feedback_column_name", DEFAULTS["feedback_column_name"])
     st.session_state["preset_name"] = preset.get("name", DEFAULTS["preset_name"])
 
@@ -470,9 +466,10 @@ def current_config_as_preset():
         "sheet_name": st.session_state.get("sheet_name_input", DEFAULTS["sheet_name_input"]),
         "anchor_type_value": st.session_state.get("anchor_type_value", DEFAULTS["anchor_type_value"]),
         "anchor_keyword": st.session_state.get("anchor_keyword", DEFAULTS["anchor_keyword"]),
-        "prompt_offset": int(st.session_state.get("prompt_offset", DEFAULTS["prompt_offset"]) or 0),
-        "answer_offset": int(st.session_state.get("answer_offset", DEFAULTS['answer_offset']) or 1),
-        "explanation_offset": int(st.session_state.get("explanation_offset", DEFAULTS["explanation_offset"]) or 6),
+        # keep 0 as 0
+        "prompt_offset": int(st.session_state.get("prompt_offset", DEFAULTS["prompt_offset"])),
+        "answer_offset": int(st.session_state.get("answer_offset", DEFAULTS["answer_offset"])),
+        "explanation_offset": int(st.session_state.get("explanation_offset", DEFAULTS["explanation_offset"])),
         "feedback_column_name": st.session_state.get("feedback_column_name", DEFAULTS["feedback_column_name"]),
     }
 
@@ -480,7 +477,7 @@ def current_config_as_preset():
 
 st.sidebar.header("Presets")
 
-# Debug controls (no behavior change, only logging)
+# Debug controls
 DEBUG_ENABLED = st.sidebar.checkbox("Enable debug logging", value=False)
 DEBUG_EVENT_LIMIT = st.sidebar.number_input("Max debug lines", min_value=200, value=5000, step=100)
 
@@ -554,21 +551,24 @@ if version_choice == "Universal":
         value=st.session_state.get("anchor_keyword", ""),
         key="anchor_keyword"
     )
+    # Prompt can be negative (no 'or 0' so 0 stays 0)
     st.number_input(
         "Rows after ANCHOR where the PROMPT lives (can be negative)",
-        value=int(st.session_state.get("prompt_offset", 0) or 0),
+        value=int(st.session_state.get("prompt_offset", 0)),
         key="prompt_offset"
     )
+    # First answer: keep 0 as 0; min 0
     st.number_input(
         "Rows after ANCHOR where the FIRST ANSWER lives",
         min_value=0,
-        value=int(st.session_state.get("answer_offset", 1) or 1),
+        value=int(st.session_state.get("answer_offset", 1)),
         key="answer_offset"
     )
+    # Feedback: keep 0 as 0; min 0
     st.number_input(
         "Rows after ANCHOR where the EXPLANATION / FEEDBACK lives",
         min_value=0,
-        value=int(st.session_state.get("explanation_offset", 6) or 6),
+        value=int(st.session_state.get("explanation_offset", 6)),
         key="explanation_offset"
     )
     st.text_input(
@@ -607,9 +607,9 @@ if word_file and excel_file and st.button("Process"):
                 st.session_state["sheet_name_input"],
                 st.session_state.get("anchor_type_value", "Question Prompt"),
                 st.session_state.get("anchor_keyword", ""),
-                int(st.session_state.get("prompt_offset", 0) or 0),
-                int(st.session_state.get("answer_offset", 1) or 1),
-                int(st.session_state.get("explanation_offset", 6) or 6),
+                int(st.session_state.get("prompt_offset", 0)),
+                int(st.session_state.get("answer_offset", 1)),
+                int(st.session_state.get("explanation_offset", 6)),
                 int(question_limit),
                 st.session_state.get("feedback_column_name", "Explanation")
             )
