@@ -332,11 +332,23 @@ def scan_word_document_universal(word_file,
     q_count = 0
     i = 1  # skip header
 
+    def is_radio_normal(tnorm: str) -> bool:
+        return tnorm.startswith('radiobutton') and tnorm.endswith('normalstate')
+
+    def find_block_end(start_idx: int) -> int:
+        """End is the next anchor (RB1) after start_idx, else end of table."""
+        k = start_idx + 1
+        while k < total_rows:
+            _, t_k, _, _ = get_vals(table.rows[k])
+            if _norm(t_k) == anchor_norm:  # RB1 of next question
+                return k
+            k += 1
+        return total_rows
+
     while i < total_rows and q_count < question_limit and q_count < len(df):
         id_text, type_text, source_text, trans_text = get_vals(table.rows[i])
         tnorm = _norm(type_text)
 
-        # log a few first rows for orientation
         if q_count == 0 and i < 10:
             d(f"[U] row {i}: type='{_short(type_text)}' norm='{tnorm}', source='{_short(source_text)}'")
 
@@ -349,6 +361,9 @@ def scan_word_document_universal(word_file,
                     i += 1
                     continue
 
+            block_end = find_block_end(i)
+            d(f"[U]   Block end at row {block_end}")
+
             q_index = q_count + 1
             df_row = df.iloc[q_index - 1]
             excel_prompt, excel_answers, _excel_expl = extract_prompt_answers_and_explanation(df_row)
@@ -357,44 +372,52 @@ def scan_word_document_universal(word_file,
 
             last_written = i
 
-            # Prompt
+            # PROMPT
             p_idx = i + prompt_offset
-            if 0 <= p_idx < total_rows:
+            if 0 <= p_idx < total_rows and p_idx < block_end:
                 put_translation(table.rows[p_idx], excel_prompt)
                 d(f"[U]   Wrote PROMPT at row {p_idx} (offset {prompt_offset})")
                 last_written = max(last_written, p_idx)
             else:
-                d(f"[U]   PROMPT target out of bounds: row {p_idx}")
+                d(f"[U]   PROMPT target out of bounds or past block end: row {p_idx}")
 
-            # Answers
+            # ANSWERS: collect only radio-button rows within the block starting at (i + answer_offset)
+            answer_rows = []
+            k = i + answer_offset
+            if not (0 <= k < total_rows):
+                d(f"[U]   Answer start out of bounds: row {k}")
+            else:
+                while k < block_end and len(answer_rows) < len(excel_answers):
+                    _, t_k, _, _ = get_vals(table.rows[k])
+                    tkn = _norm(t_k)
+                    if is_radio_normal(tkn):
+                        answer_rows.append(k)
+                    elif len(answer_rows) > 0:
+                        # Once the contiguous radio block ends, stop collecting
+                        break
+                    k += 1
+
+            d(f"[U]   Answer rows detected: {answer_rows}")
+
             for a_idx, ans in enumerate(excel_answers):
-                tgt = i + answer_offset + a_idx
-                if not (0 <= tgt < total_rows):
-                    d(f"[U]   ANSWER {a_idx+1} target out of bounds: row {tgt}")
+                if a_idx >= len(answer_rows):
+                    d(f"[U]   Not enough radio-button rows for ANSWER {a_idx+1}; stopping")
                     break
-
-                _, t_tgt, _, _ = get_vals(table.rows[tgt])
-                tnorm_tgt = _norm(t_tgt)
-
-                # With digits preserved, this only triggers on the RB1 of the NEXT question
-                if tgt != i and tnorm_tgt == anchor_norm:
-                    d(f"[U]   STOP before ANSWER {a_idx+1}: row {tgt} type='{t_tgt}' norm='{tnorm_tgt}' == anchor_norm (next block)")
-                    break
-
+                tgt = answer_rows[a_idx]
                 put_translation(table.rows[tgt], ans)
-                d(f"[U]   Wrote ANSWER {a_idx+1} at row {tgt} (type='{t_tgt}', norm='{tnorm_tgt}')")
+                d(f"[U]   Wrote ANSWER {a_idx+1} at row {tgt}")
                 last_written = max(last_written, tgt)
 
-            # Feedback
+            # FEEDBACK within block
             f_idx = i + explanation_offset
-            if 0 <= f_idx < total_rows:
-                if f_idx == i and answer_offset == 0 and len(excel_answers) > 0:
-                    d(f"[U]   WARNING: feedback row {f_idx} == anchor and answer_offset=0 → feedback will overwrite Answer 1")
+            if 0 <= f_idx < total_rows and f_idx < block_end:
+                if f_idx == i and (answer_offset == 0):
+                    d(f"[U]   WARNING: feedback row {f_idx} == anchor and answer_offset=0 → feedback may overwrite Answer 1")
                 put_translation(table.rows[f_idx], feedback_text)
                 d(f"[U]   Wrote FEEDBACK at row {f_idx} (offset {explanation_offset})")
                 last_written = max(last_written, f_idx)
             else:
-                d(f"[U]   FEEDBACK target out of bounds: row {f_idx}")
+                d(f"[U]   FEEDBACK target out of bounds or past block end: row {f_idx}")
 
             q_count += 1
             i = max(last_written + 1, i + 1)
