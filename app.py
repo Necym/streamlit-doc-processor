@@ -9,8 +9,8 @@ from io import BytesIO
 # ───────────────────────── Helpers: header detection / normalization ─────────────────────────
 
 def _norm(s: str) -> str:
-    """Normalize table labels for robust matching."""
-    return re.sub(r'[^a-z]+', '', (s or '').lower())
+    """Normalize table labels for robust matching (keep digits so answer rows remain distinct)."""
+    return re.sub(r'[^a-z0-9]+', '', (s or '').lower())
 
 def _get_header_indices(header_cells):
     """Return indices for id/type/sourcetext/translation or None."""
@@ -319,6 +319,7 @@ def scan_word_document_universal(word_file,
                 if not (0 <= tgt < total_rows):
                     break
                 _, t_tgt, _, _ = get_vals(table.rows[tgt])
+                # Stop if we hit the next anchor type (digits preserved so RB1 != RB2)
                 if tgt != i and _norm(t_tgt) == anchor_norm:
                     break
                 put_translation(table.rows[tgt], ans)
