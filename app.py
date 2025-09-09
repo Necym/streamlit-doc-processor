@@ -12,6 +12,10 @@ def _norm(s: str) -> str:
     """Normalize table labels for robust matching (keep digits so RB1..RB4 stay distinct)."""
     return re.sub(r'[^a-z0-9]+', '', (s or '').lower())
 
+def _norm_nodigits(s: str) -> str:
+    """Normalization WITHOUT digits (used only for duplicate-prompt detection)."""
+    return re.sub(r'[^a-z]+', '', (s or '').lower())
+
 def _get_header_indices(header_cells):
     """Return indices for id/type/sourcetext/translation or None."""
     labels = [_norm(c.text) for c in header_cells]
@@ -269,7 +273,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
     out.seek(0)
     return out, f"Processed {q_count} question(s) [Version B] with sheet '{sheet_name}'."
 
-# ───────────────────────── Universal (anchor + configurable offsets; radio-only answers) ─────────────────────────
+# ───────────────────────── Universal (anchor + configurable offsets; radio-only answers; optional duplicate prompt clearing) ─────────────────────────
 
 def scan_word_document_universal(word_file,
                                  excel_file,
@@ -280,7 +284,8 @@ def scan_word_document_universal(word_file,
                                  answer_offset: int,
                                  explanation_offset: int,
                                  question_limit: int,
-                                 feedback_column_name: str = 'Explanation'):
+                                 feedback_column_name: str = 'Explanation',
+                                 remove_duplicate_prompts: bool = False):
     d(f"[U] Loading Excel sheet: {sheet_name}")
 
     try:
@@ -322,7 +327,8 @@ def scan_word_document_universal(word_file,
 
     anchor_norm = _norm(anchor_type_value)
     d(f"[U] Anchor config: anchor_type_value='{anchor_type_value}', anchor_norm='{anchor_norm}', "
-      f"keyword='{anchor_keyword}', offsets: P={prompt_offset}, A={answer_offset}, E={explanation_offset}")
+      f"keyword='{anchor_keyword}', offsets: P={prompt_offset}, A={answer_offset}, E={explanation_offset}, "
+      f"remove_dupe_prompts={remove_duplicate_prompts}")
 
     total_rows = len(table.rows)
     d(f"[U] Total table rows: {total_rows}")
@@ -369,12 +375,25 @@ def scan_word_document_universal(word_file,
 
             last_written = i
 
-            # PROMPT
+            # PROMPT at anchor + offset (can be negative)
             p_idx = i + prompt_offset
             if 0 <= p_idx < total_rows and p_idx < block_end:
                 put_translation(table.rows[p_idx], excel_prompt)
                 d(f"[U]   Wrote PROMPT at row {p_idx} (offset {prompt_offset})")
                 last_written = max(last_written, p_idx)
+
+                # Optional: remove duplicate Question Prompt row immediately after prompt
+                if remove_duplicate_prompts and (p_idx + 1) < block_end:
+                    _, t_prompt, _, _ = get_vals(table.rows[p_idx])
+                    _, t_next, _, _ = get_vals(table.rows[p_idx + 1])
+                    t_prompt_norm = _norm_nodigits(t_prompt)
+                    t_next_norm = _norm_nodigits(t_next)
+                    d(f"[U]   Dupe-check: type[prompt]='{t_prompt}'→'{t_prompt_norm}', "
+                      f"type[next]='{t_next}'→'{t_next_norm}'")
+                    if t_next_norm == t_prompt_norm:
+                        put_translation(table.rows[p_idx + 1], "")
+                        d(f"[U]   Cleared TRANSLATION at row {p_idx + 1} (duplicate prompt)")
+
             else:
                 d(f"[U]   PROMPT target out of bounds or past block end: row {p_idx}")
 
@@ -390,7 +409,6 @@ def scan_word_document_universal(word_file,
                     if is_radio_normal(tkn):
                         answer_rows.append(k)
                     elif len(answer_rows) > 0:
-                        # Once the contiguous radio block ends, stop collecting
                         break
                     k += 1
 
@@ -437,6 +455,7 @@ DEFAULTS = {
     "answer_offset": 1,
     "explanation_offset": 6,
     "feedback_column_name": "Explanation",
+    "remove_duplicate_prompts": False,   # NEW default: OFF
     "preset_name": ""
 }
 
@@ -455,6 +474,7 @@ def apply_preset_dict(preset: dict):
     st.session_state["answer_offset"] = int(preset.get("answer_offset", DEFAULTS["answer_offset"]))
     st.session_state["explanation_offset"] = int(preset.get("explanation_offset", DEFAULTS["explanation_offset"]))
     st.session_state["feedback_column_name"] = preset.get("feedback_column_name", DEFAULTS["feedback_column_name"])
+    st.session_state["remove_duplicate_prompts"] = bool(preset.get("remove_duplicate_prompts", DEFAULTS["remove_duplicate_prompts"]))
     st.session_state["preset_name"] = preset.get("name", DEFAULTS["preset_name"])
 
 def current_config_as_preset():
@@ -471,6 +491,7 @@ def current_config_as_preset():
         "answer_offset": int(st.session_state.get("answer_offset", DEFAULTS["answer_offset"])),
         "explanation_offset": int(st.session_state.get("explanation_offset", DEFAULTS["explanation_offset"])),
         "feedback_column_name": st.session_state.get("feedback_column_name", DEFAULTS["feedback_column_name"]),
+        "remove_duplicate_prompts": bool(st.session_state.get("remove_duplicate_prompts", DEFAULTS["remove_duplicate_prompts"])),
     }
 
 # ───────────────────────── Sidebar: Presets FIRST (fast + re-apply) ─────────────────────────
@@ -520,7 +541,7 @@ st.sidebar.caption("Presets are local JSON files. Upload to apply instantly. Use
 
 # ───────────────────────── Main UI ─────────────────────────
 
-st.title("Document Processor — Multi-Version (Debug Instrumented)")
+st.title("Document Processor — Multi-Version (Debug + Dupe-Prompt Option)")
 
 # Version selector
 version_choice = st.selectbox(
@@ -551,7 +572,7 @@ if version_choice == "Universal":
         value=st.session_state.get("anchor_keyword", ""),
         key="anchor_keyword"
     )
-    # Prompt can be negative (no 'or 0' so 0 stays 0)
+    # Prompt can be negative (0 stays 0)
     st.number_input(
         "Rows after ANCHOR where the PROMPT lives (can be negative)",
         value=int(st.session_state.get("prompt_offset", 0)),
@@ -575,6 +596,12 @@ if version_choice == "Universal":
         "Excel column to use for the final feedback row",
         value=st.session_state.get("feedback_column_name", "Explanation"),
         key="feedback_column_name"
+    )
+    st.checkbox(
+        "Remove duplicate Question Prompt row (clear the Translation cell of the duplicate)",
+        value=bool(st.session_state.get("remove_duplicate_prompts", False)),
+        key="remove_duplicate_prompts",
+        help="If checked, and the row immediately after the prompt has the same Type (ignoring digits), its Translation cell will be cleared."
     )
 
 # Files & controls (common)
@@ -611,7 +638,8 @@ if word_file and excel_file and st.button("Process"):
                 int(st.session_state.get("answer_offset", 1)),
                 int(st.session_state.get("explanation_offset", 6)),
                 int(question_limit),
-                st.session_state.get("feedback_column_name", "Explanation")
+                st.session_state.get("feedback_column_name", "Explanation"),
+                bool(st.session_state.get("remove_duplicate_prompts", False))
             )
 
         st.write(output_message)
