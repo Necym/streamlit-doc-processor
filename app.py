@@ -246,8 +246,9 @@ def scan_word_document_universal(word_file,
                                  explanation_offset: int,
                                  question_limit: int,
                                  feedback_column_name: str = 'Explanation'):
-    if prompt_offset < 0 or answer_offset < 0 or explanation_offset < 0:
-        raise RuntimeError("Offsets must be non-negative integers (>= 0).")
+    # Allow prompt_offset to be negative; keep others non-negative
+    if answer_offset < 0 or explanation_offset < 0:
+        raise RuntimeError("Answer and explanation offsets must be non-negative. Prompt offset may be negative.")
 
     try:
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
@@ -304,7 +305,7 @@ def scan_word_document_universal(word_file,
 
             last_written = i
 
-            # Prompt at anchor + offset
+            # Prompt at anchor + offset (can be negative)
             p_idx = i + prompt_offset
             if 0 <= p_idx < total_rows:
                 _, t_p, _, _ = get_vals(table.rows[p_idx])
@@ -312,7 +313,7 @@ def scan_word_document_universal(word_file,
                     put_translation(table.rows[p_idx], excel_prompt)
                     last_written = max(last_written, p_idx)
 
-            # Answers start at anchor + answer_offset
+            # Answers start at anchor + answer_offset (non-negative)
             for a_idx, ans in enumerate(excel_answers):
                 tgt = i + answer_offset + a_idx
                 if not (0 <= tgt < total_rows):
@@ -323,7 +324,7 @@ def scan_word_document_universal(word_file,
                 put_translation(table.rows[tgt], ans)
                 last_written = max(last_written, tgt)
 
-            # Feedback/explanation at anchor + explanation_offset
+            # Feedback/explanation at anchor + explanation_offset (non-negative)
             f_idx = i + explanation_offset
             if 0 <= f_idx < total_rows:
                 _, t_f, _, _ = get_vals(table.rows[f_idx])
@@ -462,9 +463,9 @@ if version_choice == "Universal":
         value=st.session_state.get("anchor_keyword", ""),
         key="anchor_keyword"
     )
+    # Allow negative prompt offset by not setting min_value
     st.number_input(
-        "Rows after ANCHOR where the PROMPT lives",
-        min_value=0,
+        "Rows after ANCHOR where the PROMPT lives (can be negative)",
         value=int(st.session_state.get("prompt_offset", 0) or 0),
         key="prompt_offset"
     )
