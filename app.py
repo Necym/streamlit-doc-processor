@@ -9,8 +9,8 @@ from io import BytesIO
 # ───────────────────────── Helpers: header detection / normalization ─────────────────────────
 
 def _norm(s: str) -> str:
-    """Normalize table labels for robust matching (keep digits so answer rows remain distinct)."""
-    return re.sub(r'[^a-z0-9]+', '', (s or '').lower())
+    """Normalize table labels for robust matching (current behavior: drop digits)."""
+    return re.sub(r'[^a-z]+', '', (s or '').lower())
 
 def _get_header_indices(header_cells):
     """Return indices for id/type/sourcetext/translation or None."""
@@ -23,6 +23,20 @@ def _get_header_indices(header_cells):
                 idx[key] = i
                 break
     return idx if len(idx) == 4 else None
+
+# ───────────────────────── Debug helpers ─────────────────────────
+
+DEBUG_ENABLED = False
+DEBUG_LOG = []
+DEBUG_EVENT_LIMIT = 5000  # safety cap
+
+def d(msg: str):
+    if DEBUG_ENABLED and len(DEBUG_LOG) < DEBUG_EVENT_LIMIT:
+        DEBUG_LOG.append(str(msg))
+
+def _short(s: str, n: int = 120) -> str:
+    s = s or ""
+    return (s[:n] + "…") if len(s) > n else s
 
 # ───────────────────────── Excel parsing (same as your original behavior) ─────────────────────────
 
@@ -56,6 +70,7 @@ def get_feedback_value(df_row, feedback_column_name: str):
 # ───────────────────────── Version A (Type-anchored, fills Explanation) ─────────────────────────
 
 def scan_word_document_version_a(word_file, excel_file, sheet_name, question_limit):
+    d(f"[A] Loading Excel sheet: {sheet_name}")
     try:
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
     except ValueError as e:
@@ -76,6 +91,8 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
     if table is None:
         raise RuntimeError("No table with headers [ID, Type, Source Text, Translation] found.")
 
+    d(f"[A] Header indices: {col}")
+
     def get_vals(row_obj):
         cells = row_obj.cells
         return (
@@ -89,33 +106,38 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
         row_obj.cells[col['translation']].text = text
 
     total_rows = len(table.rows)
+    d(f"[A] Total table rows: {total_rows}")
     q_count = 0
     i = 1  # skip header
 
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, _, _ = get_vals(table.rows[i])
-        if _norm(type_text) == 'questionprompt':
+        tnorm = _norm(type_text)
+        if tnorm == 'questionprompt':
+            d(f"[A] Anchor (Question Prompt) found at row {i}: type='{type_text}' norm='{tnorm}'")
             q_index = q_count + 1
             excel_prompt, excel_answers, excel_explanation = extract_prompt_answers_and_explanation(df.iloc[q_index - 1])
+            d(f"[A] Q{q_index}: answers parsed={len(excel_answers)}")
 
-            # Prompt
             put_translation(table.rows[i], excel_prompt)
+            d(f"[A]   Wrote PROMPT at row {i}")
 
-            # Answers
             answers_needed = min(4, len(excel_answers))
             answers_filled = 0
             j = 1
             while answers_filled < answers_needed and (i + j) < total_rows:
                 _, t_next, _, _ = get_vals(table.rows[i + j])
-                tnorm = _norm(t_next)
-                if tnorm == 'questionprompt':
+                tnorm_next = _norm(t_next)
+                if tnorm_next == 'questionprompt':
+                    d(f"[A]   Stop answers at row {i+j}: next Question Prompt")
                     break
-                if tnorm.startswith('radiobutton') and tnorm.endswith('normalstate'):
+                if tnorm_next.startswith('radiobutton') and tnorm_next.endswith('normalstate'):
                     put_translation(table.rows[i + j], excel_answers[answers_filled])
+                    d(f"[A]   Wrote ANSWER {answers_filled+1} at row {i+j} (type='{t_next}', norm='{tnorm_next}')")
                     answers_filled += 1
                 j += 1
 
-            # Explanation (first 'Rounded Rectangular Caption' after answers; skip copyright)
+            # Explanation after answers
             k = i + j
             while k < total_rows:
                 _, t_k, _, _ = get_vals(table.rows[k])
@@ -125,9 +147,11 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
                     continue
                 if tknorm == 'roundedrectangularcaption':
                     put_translation(table.rows[k], excel_explanation)
+                    d(f"[A]   Wrote EXPLANATION at row {k}")
                     k += 1
                     break
                 if tknorm == 'questionprompt':
+                    d(f"[A]   Stop explanation at row {k}: next Question Prompt")
                     break
                 k += 1
 
@@ -144,6 +168,7 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
 # ───────────────────────── Version B (Type-anchored, fills Correct feedback) ─────────────────────────
 
 def scan_word_document_version_b(word_file, excel_file, sheet_name, question_limit):
+    d(f"[B] Loading Excel sheet: {sheet_name}")
     try:
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
     except ValueError as e:
@@ -164,6 +189,8 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
     if table is None:
         raise RuntimeError("No table with headers [ID, Type, Source Text, Translation] found.")
 
+    d(f"[B] Header indices: {col}")
+
     def get_vals(row_obj):
         cells = row_obj.cells
         return (
@@ -177,49 +204,57 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
         row_obj.cells[col['translation']].text = text
 
     total_rows = len(table.rows)
+    d(f"[B] Total table rows: {total_rows}")
     q_count = 0
     i = 1  # skip header
 
     while i < total_rows and q_count < question_limit and q_count < len(df):
         _, type_text, _, _ = get_vals(table.rows[i])
-        if _norm(type_text) == 'questionprompt':
+        tnorm = _norm(type_text)
+        if tnorm == 'questionprompt':
+            d(f"[B] Anchor (Question Prompt) found at row {i}: type='{type_text}' norm='{tnorm}'")
             q_index = q_count + 1
             excel_prompt, excel_answers, _excel_expl = extract_prompt_answers_and_explanation(df.iloc[q_index - 1])
             correct_feedback = get_feedback_value(df.iloc[q_index - 1], 'Correct')
+            d(f"[B] Q{q_index}: answers parsed={len(excel_answers)}")
 
-            # Prompt
             put_translation(table.rows[i], excel_prompt)
+            d(f"[B]   Wrote PROMPT at row {i}")
 
-            # Answers
             answers_needed = min(4, len(excel_answers))
             answers_filled = 0
             j = 1
             while answers_filled < answers_needed and (i + j) < total_rows:
                 _, t_next, _, _ = get_vals(table.rows[i + j])
-                tnorm = _norm(t_next)
-                if tnorm == 'questionprompt':
+                tnorm_next = _norm(t_next)
+                if tnorm_next == 'questionprompt':
+                    d(f"[B]   Stop answers at row {i+j}: next Question Prompt")
                     break
-                if tnorm.startswith('radiobutton') and tnorm.endswith('normalstate'):
+                if tnorm_next.startswith('radiobutton') and tnorm_next.endswith('normalstate'):
                     put_translation(table.rows[i + j], excel_answers[answers_filled])
+                    d(f"[B]   Wrote ANSWER {answers_filled+1} at row {i+j} (type='{t_next}', norm='{tnorm_next}')")
                     answers_filled += 1
                 j += 1
 
-            # Correct feedback: skip copyright; then two Text Box rows
+            # Correct feedback rows (Text Box x 2)
             k = i + j
             label_found = False
             while k < total_rows:
                 _, t_k, _, _ = get_vals(table.rows[k])
                 tknorm = _norm(t_k)
                 if tknorm == 'questionprompt':
+                    d(f"[B]   Stop feedback at row {k}: next Question Prompt")
                     break
                 if tknorm == 'copyright':
                     k += 1
                     continue
                 if tknorm == 'textbox':
                     if not label_found:
-                        label_found = True  # "Correct!" label
+                        label_found = True
+                        d(f"[B]   Found 'Correct!' label at row {k}")
                     else:
-                        put_translation(table.rows[k], correct_feedback)  # feedback row
+                        put_translation(table.rows[k], correct_feedback)
+                        d(f"[B]   Wrote CORRECT FEEDBACK at row {k}")
                         k += 1
                         break
                 k += 1
@@ -246,6 +281,7 @@ def scan_word_document_universal(word_file,
                                  explanation_offset: int,
                                  question_limit: int,
                                  feedback_column_name: str = 'Explanation'):
+    d(f"[U] Loading Excel sheet: {sheet_name}")
     # Allow prompt_offset to be negative; keep others non-negative
     if answer_offset < 0 or explanation_offset < 0:
         raise RuntimeError("Answer and explanation offsets must be non-negative. Prompt offset may be negative.")
@@ -273,6 +309,8 @@ def scan_word_document_universal(word_file,
     if table is None:
         raise RuntimeError("No table with headers [ID, Type, Source Text, Translation] found.")
 
+    d(f"[U] Header indices: {col}")
+
     def get_vals(row_obj):
         cells = row_obj.cells
         return (
@@ -286,85 +324,79 @@ def scan_word_document_universal(word_file,
         row_obj.cells[col['translation']].text = text
 
     anchor_norm = _norm(anchor_type_value)
+    d(f"[U] Anchor config: anchor_type_value='{anchor_type_value}', anchor_norm='{anchor_norm}', "
+      f"keyword='{anchor_keyword}', offsets: P={prompt_offset}, A={answer_offset}, E={explanation_offset}")
+
     total_rows = len(table.rows)
+    d(f"[U] Total table rows: {total_rows}")
     q_count = 0
     i = 1  # skip header
 
-    # helper to find end of this block (next anchor of the same type)
-    def find_block_end(start_idx: int) -> int:
-        k = start_idx + 1
-        while k < total_rows:
-            _, t_k, _, _ = get_vals(table.rows[k])
-            if _norm(t_k) == anchor_norm:  # next question's first answer (or next anchor)
-                return k
-            k += 1
-        return total_rows
-
     while i < total_rows and q_count < question_limit and q_count < len(df):
-        _, type_text, source_text, _ = get_vals(table.rows[i])
-        if _norm(type_text) == anchor_norm:
-            # Optional keyword check against Source Text
+        id_text, type_text, source_text, trans_text = get_vals(table.rows[i])
+        tnorm = _norm(type_text)
+
+        # log a few first rows for orientation
+        if q_count == 0 and i < 10:
+            d(f"[U] row {i}: type='{_short(type_text)}' norm='{tnorm}', source='{_short(source_text)}'")
+
+        if tnorm == anchor_norm:
+            d(f"[U] Anchor FOUND at row {i}: type='{type_text}', norm='{tnorm}', source='{_short(source_text)}'")
+
             if anchor_keyword and anchor_keyword.strip():
                 if anchor_keyword.lower() not in source_text.lower():
+                    d(f"[U]   Skipped anchor at row {i}: keyword '{anchor_keyword}' not in source.")
                     i += 1
                     continue
-
-            block_end = find_block_end(i)
 
             q_index = q_count + 1
             df_row = df.iloc[q_index - 1]
             excel_prompt, excel_answers, _excel_expl = extract_prompt_answers_and_explanation(df_row)
             feedback_text = get_feedback_value(df_row, feedback_column_name)
+            d(f"[U]   Q{q_index}: answers parsed={len(excel_answers)}")
 
             last_written = i
 
-            # Prompt at anchor + offset (can be negative)
+            # Prompt
             p_idx = i + prompt_offset
             if 0 <= p_idx < total_rows:
-                _, t_p, _, _ = get_vals(table.rows[p_idx])
-                # avoid writing prompt onto another anchor of the same type
-                if p_idx == i or _norm(t_p) != anchor_norm:
-                    put_translation(table.rows[p_idx], excel_prompt)
-                    last_written = max(last_written, p_idx)
+                put_translation(table.rows[p_idx], excel_prompt)
+                d(f"[U]   Wrote PROMPT at row {p_idx} (offset {prompt_offset})")
+                last_written = max(last_written, p_idx)
+            else:
+                d(f"[U]   PROMPT target out of bounds: row {p_idx}")
 
             # Answers
-            if answer_offset == 0:
-                # Collect answer rows within this question block: Radio Button * - Normal state
-                answer_rows = []
-                k = i  # include the anchor (RB1) as first answer row
-                while k < block_end and len(answer_rows) < len(excel_answers):
-                    _, t_k, _, _ = get_vals(table.rows[k])
-                    tkn = _norm(t_k)
-                    if tkn.startswith('radiobutton') and tkn.endswith('normalstate'):
-                        answer_rows.append(k)
-                    k += 1
+            for a_idx, ans in enumerate(excel_answers):
+                tgt = i + answer_offset + a_idx
+                if not (0 <= tgt < total_rows):
+                    d(f"[U]   ANSWER {a_idx+1} target out of bounds: row {tgt}")
+                    break
 
-                for a_idx, ans in enumerate(excel_answers):
-                    if a_idx >= len(answer_rows):
-                        break
-                    tgt = answer_rows[a_idx]
-                    put_translation(table.rows[tgt], ans)
-                    last_written = max(last_written, tgt)
-            else:
-                # Legacy offset-based behavior (ensure we don't cross into next block)
-                for a_idx, ans in enumerate(excel_answers):
-                    tgt = i + answer_offset + a_idx
-                    if not (0 <= tgt < total_rows) or tgt >= block_end:
-                        break
-                    _, t_tgt, _, _ = get_vals(table.rows[tgt])
-                    # stop if we hit a new anchor of the same type
-                    if tgt != i and _norm(t_tgt) == anchor_norm:
-                        break
-                    put_translation(table.rows[tgt], ans)
-                    last_written = max(last_written, tgt)
+                _, t_tgt, _, _ = get_vals(table.rows[tgt])
+                tnorm_tgt = _norm(t_tgt)
 
-            # Feedback/explanation at anchor + explanation_offset (non-negative), keep within block
+                # key guard that often causes early stop when digits are stripped
+                if tgt != i and tnorm_tgt == anchor_norm:
+                    d(f"[U]   STOP before ANSWER {a_idx+1}: row {tgt} type='{t_tgt}' norm='{tnorm_tgt}' "
+                      f"== anchor_norm (likely RB2/RB3 collapsed)")
+                    break
+
+                put_translation(table.rows[tgt], ans)
+                d(f"[U]   Wrote ANSWER {a_idx+1} at row {tgt} (type='{t_tgt}', norm='{tnorm_tgt}')")
+                last_written = max(last_written, tgt)
+
+            # Feedback
             f_idx = i + explanation_offset
-            if 0 <= f_idx < total_rows and f_idx < block_end:
-                _, t_f, _, _ = get_vals(table.rows[f_idx])
-                if f_idx == i or _norm(t_f) != anchor_norm:
-                    put_translation(table.rows[f_idx], feedback_text)
-                    last_written = max(last_written, f_idx)
+            if 0 <= f_idx < total_rows:
+                # Note: if f_idx == i and answer_offset == 0, this overwrites Answer 1 (we log it)
+                if f_idx == i and answer_offset == 0 and len(excel_answers) > 0:
+                    d(f"[U]   WARNING: feedback row {f_idx} == anchor and answer_offset=0 → feedback will overwrite Answer 1")
+                put_translation(table.rows[f_idx], feedback_text)
+                d(f"[U]   Wrote FEEDBACK at row {f_idx} (offset {explanation_offset})")
+                last_written = max(last_written, f_idx)
+            else:
+                d(f"[U]   FEEDBACK target out of bounds: row {f_idx}")
 
             q_count += 1
             i = max(last_written + 1, i + 1)
@@ -418,7 +450,7 @@ def current_config_as_preset():
         "anchor_type_value": st.session_state.get("anchor_type_value", DEFAULTS["anchor_type_value"]),
         "anchor_keyword": st.session_state.get("anchor_keyword", DEFAULTS["anchor_keyword"]),
         "prompt_offset": int(st.session_state.get("prompt_offset", DEFAULTS["prompt_offset"]) or 0),
-        "answer_offset": int(st.session_state.get("answer_offset", DEFAULTS["answer_offset"]) or 1),
+        "answer_offset": int(st.session_state.get("answer_offset", DEFAULTS['answer_offset']) or 1),
         "explanation_offset": int(st.session_state.get("explanation_offset", DEFAULTS["explanation_offset"]) or 6),
         "feedback_column_name": st.session_state.get("feedback_column_name", DEFAULTS["feedback_column_name"]),
     }
@@ -426,6 +458,10 @@ def current_config_as_preset():
 # ───────────────────────── Sidebar: Presets FIRST (fast + re-apply) ─────────────────────────
 
 st.sidebar.header("Presets")
+
+# Debug controls (no behavior change, only logging)
+DEBUG_ENABLED = st.sidebar.checkbox("Enable debug logging", value=False)
+DEBUG_EVENT_LIMIT = st.sidebar.number_input("Max debug lines", min_value=200, value=5000, step=100)
 
 # One-time defaults
 ensure_defaults()
@@ -466,7 +502,7 @@ st.sidebar.caption("Presets are local JSON files. Upload to apply instantly. Use
 
 # ───────────────────────── Main UI ─────────────────────────
 
-st.title("Document Processor — Multi-Version (Fast Presets)")
+st.title("Document Processor — Multi-Version (Debug Instrumented)")
 
 # Version selector
 version_choice = st.selectbox(
@@ -497,7 +533,6 @@ if version_choice == "Universal":
         value=st.session_state.get("anchor_keyword", ""),
         key="anchor_keyword"
     )
-    # Allow negative prompt offset by not setting min_value
     st.number_input(
         "Rows after ANCHOR where the PROMPT lives (can be negative)",
         value=int(st.session_state.get("prompt_offset", 0) or 0),
@@ -528,6 +563,11 @@ question_limit = st.number_input("How many questions would you like to process?"
 
 # Process
 if word_file and excel_file and st.button("Process"):
+    # reset debug buffer
+    if DEBUG_ENABLED:
+        DEBUG_LOG.clear()
+        d("=== DEBUG START ===")
+
     word_bytes = word_file.read()
     excel_bytes = excel_file.read()
     try:
@@ -561,7 +601,17 @@ if word_file and excel_file and st.button("Process"):
             file_name="updated_document.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
+
+        if DEBUG_ENABLED:
+            with st.expander("Debug log"):
+                st.code("\n".join(DEBUG_LOG) if DEBUG_LOG else "(no debug entries)")
     except RuntimeError as e:
         st.error(str(e))
+        if DEBUG_ENABLED:
+            with st.expander("Debug log"):
+                st.code("\n".join(DEBUG_LOG) if DEBUG_LOG else "(no debug entries)")
     except Exception as e:
         st.exception(e)
+        if DEBUG_ENABLED:
+            with st.expander("Debug log"):
+                st.code("\n".join(DEBUG_LOG) if DEBUG_LOG else "(no debug entries)")
