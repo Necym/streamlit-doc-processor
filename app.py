@@ -44,22 +44,18 @@ def _short(s: str, n: int = 120) -> str:
 
 # ───────────────────────── Word writing helper (preserve paragraphs & line breaks) ─────────────────────────
 
-def set_cell_text_preserve_paras(cell, text: str):
+def set_cell_text_preserve_paras(cell, text: str, add_spacer_between_paragraphs: bool = False):
     """
     Clear the cell and write text preserving:
-      - Paragraph breaks for blank lines (\\n\\s*\\n)
+      - Paragraph breaks for blank lines (\\n\\s*\\n) → real Word paragraphs
       - Soft line breaks for single \\n within a paragraph
-
-    Using python-docx:
-      * Multiple paragraphs => true paragraph spacing in Word
-      * Single \\n inside a paragraph => soft line break (Shift+Enter)
+    Optionally insert a blank spacer paragraph BETWEEN paragraphs for visible extra space.
     """
     s = str(text or "")
     # Normalize line endings
     s = s.replace("\r\n", "\n").replace("\r", "\n")
 
-    # Remove all existing paragraphs in the cell
-    # (cell.text = "" leaves one empty paragraph; we want a clean slate)
+    # Remove existing paragraphs
     for p in list(cell.paragraphs):
         p._element.getparent().remove(p._element)
 
@@ -71,18 +67,19 @@ def set_cell_text_preserve_paras(cell, text: str):
     # Split on one or more blank lines to form paragraphs
     paragraphs = re.split(r"\n\s*\n", s)
 
-    for para_text in paragraphs:
+    for idx, para_text in enumerate(paragraphs):
         p = cell.add_paragraph()
         # Allow soft line breaks within a paragraph
         lines = para_text.split("\n")
-        if not lines:
-            continue
-        # First line
-        run = p.add_run(lines[0])
-        # Remaining lines as soft breaks
-        for line in lines[1:]:
-            run.add_break()
-            p.add_run(line)
+        if lines:
+            run = p.add_run(lines[0])
+            for line in lines[1:]:
+                run.add_break()
+                p.add_run(line)
+        # Insert a spacer paragraph between paragraphs if requested
+        if add_spacer_between_paragraphs and idx < len(paragraphs) - 1:
+            sp = cell.add_paragraph()
+            sp.add_run("")  # explicit empty paragraph
 
 # ───────────────────────── Excel parsing (same as your original behavior) ─────────────────────────
 
@@ -148,8 +145,8 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
             cells[col['translation']].text.strip()
         )
 
-    def put_translation(row_obj, text):
-        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text)
+    def put_translation(row_obj, text, is_prompt=False):
+        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text, add_spacer_between_paragraphs=is_prompt)
 
     total_rows = len(table.rows)
     d(f"[A] Total table rows: {total_rows}")
@@ -165,7 +162,8 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
             excel_prompt, excel_answers, excel_explanation = extract_prompt_answers_and_explanation(df.iloc[q_index - 1])
             d(f"[A] Q{q_index}: answers parsed={len(excel_answers)}")
 
-            put_translation(table.rows[i], excel_prompt)
+            # PROMPT with spacer
+            put_translation(table.rows[i], excel_prompt, is_prompt=True)
             d(f"[A]   Wrote PROMPT at row {i}")
 
             answers_needed = min(4, len(excel_answers))
@@ -178,7 +176,7 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
                     d(f"[A]   Stop answers at row {i+j}: next Question Prompt")
                     break
                 if tnorm_next.startswith('radiobutton') and tnorm_next.endswith('normalstate'):
-                    put_translation(table.rows[i + j], excel_answers[answers_filled])
+                    put_translation(table.rows[i + j], excel_answers[answers_filled], is_prompt=False)
                     d(f"[A]   Wrote ANSWER {answers_filled+1} at row {i+j} (type='{t_next}', norm='{tnorm_next}')")
                     answers_filled += 1
                 j += 1
@@ -192,7 +190,7 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
                     k += 1
                     continue
                 if tknorm == 'roundedrectangularcaption':
-                    put_translation(table.rows[k], excel_explanation)
+                    put_translation(table.rows[k], excel_explanation, is_prompt=False)
                     d(f"[A]   Wrote EXPLANATION at row {k}")
                     k += 1
                     break
@@ -246,8 +244,8 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
             cells[col['translation']].text.strip()
         )
 
-    def put_translation(row_obj, text):
-        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text)
+    def put_translation(row_obj, text, is_prompt=False):
+        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text, add_spacer_between_paragraphs=is_prompt)
 
     total_rows = len(table.rows)
     d(f"[B] Total table rows: {total_rows}")
@@ -264,7 +262,8 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
             correct_feedback = get_feedback_value(df.iloc[q_index - 1], 'Correct')
             d(f"[B] Q{q_index}: answers parsed={len(excel_answers)}")
 
-            put_translation(table.rows[i], excel_prompt)
+            # PROMPT with spacer
+            put_translation(table.rows[i], excel_prompt, is_prompt=True)
             d(f"[B]   Wrote PROMPT at row {i}")
 
             answers_needed = min(4, len(excel_answers))
@@ -277,7 +276,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                     d(f"[B]   Stop answers at row {i+j}: next Question Prompt")
                     break
                 if tnorm_next.startswith('radiobutton') and tnorm_next.endswith('normalstate'):
-                    put_translation(table.rows[i + j], excel_answers[answers_filled])
+                    put_translation(table.rows[i + j], excel_answers[answers_filled], is_prompt=False)
                     d(f"[B]   Wrote ANSWER {answers_filled+1} at row {i+j} (type='{t_next}', norm='{tnorm_next}')")
                     answers_filled += 1
                 j += 1
@@ -299,7 +298,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
                         label_found = True
                         d(f"[B]   Found 'Correct!' label at row {k}")
                     else:
-                        put_translation(table.rows[k], correct_feedback)
+                        put_translation(table.rows[k], correct_feedback, is_prompt=False)
                         d(f"[B]   Wrote CORRECT FEEDBACK at row {k}")
                         k += 1
                         break
@@ -364,8 +363,8 @@ def scan_word_document_universal(word_file,
             cells[col['translation']].text.strip()
         )
 
-    def put_translation(row_obj, text):
-        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text)
+    def put_translation(row_obj, text, is_prompt=False):
+        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text, add_spacer_between_paragraphs=is_prompt)
 
     anchor_norm = _norm(anchor_type_value)
     d(f"[U] Anchor config: anchor_type_value='{anchor_type_value}', anchor_norm='{anchor_norm}', "
@@ -418,10 +417,10 @@ def scan_word_document_universal(word_file,
             last_written = i
             local_bump = 0  # +1 bump only if a duplicate prompt is detected
 
-            # PROMPT at anchor + offset (can be negative)
+            # PROMPT at anchor + offset (can be negative) — with spacer
             p_idx = i + prompt_offset
             if 0 <= p_idx < total_rows and p_idx < block_end:
-                put_translation(table.rows[p_idx], excel_prompt)
+                put_translation(table.rows[p_idx], excel_prompt, is_prompt=True)
                 d(f"[U]   Wrote PROMPT at row {p_idx} (offset {prompt_offset})")
                 last_written = max(last_written, p_idx)
 
@@ -465,14 +464,14 @@ def scan_word_document_universal(word_file,
                     d(f"[U]   Not enough radio-button rows for ANSWER {a_idx+1}; stopping")
                     break
                 tgt = answer_rows[a_idx]
-                put_translation(table.rows[tgt], ans)
+                put_translation(table.rows[tgt], ans, is_prompt=False)
                 d(f"[U]   Wrote ANSWER {a_idx+1} at row {tgt}")
                 last_written = max(last_written, tgt)
 
             # FEEDBACK within block at (i + explanation_offset + local_bump)
             f_idx = i + explanation_offset + local_bump
             if 0 <= f_idx < total_rows and f_idx < block_end:
-                put_translation(table.rows[f_idx], feedback_text)
+                put_translation(table.rows[f_idx], feedback_text, is_prompt=False)
                 d(f"[U]   Wrote FEEDBACK at row {f_idx} (offset {explanation_offset} + bump {local_bump})")
                 last_written = max(last_written, f_idx)
             else:
