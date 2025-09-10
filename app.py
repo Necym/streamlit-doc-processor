@@ -42,7 +42,49 @@ def _short(s: str, n: int = 120) -> str:
     s = s or ""
     return (s[:n] + "…") if len(s) > n else s
 
-# ───────────────────────── Excel parsing (same as original behavior) ─────────────────────────
+# ───────────────────────── Word writing helper (preserve paragraphs & line breaks) ─────────────────────────
+
+def set_cell_text_preserve_paras(cell, text: str):
+    """
+    Clear the cell and write text preserving:
+      - Paragraph breaks for blank lines (\\n\\s*\\n)
+      - Soft line breaks for single \\n within a paragraph
+
+    Using python-docx:
+      * Multiple paragraphs => true paragraph spacing in Word
+      * Single \\n inside a paragraph => soft line break (Shift+Enter)
+    """
+    s = str(text or "")
+    # Normalize line endings
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Remove all existing paragraphs in the cell
+    # (cell.text = "" leaves one empty paragraph; we want a clean slate)
+    for p in list(cell.paragraphs):
+        p._element.getparent().remove(p._element)
+
+    # If empty, leave the cell blank
+    if s == "":
+        cell.text = ""
+        return
+
+    # Split on one or more blank lines to form paragraphs
+    paragraphs = re.split(r"\n\s*\n", s)
+
+    for para_text in paragraphs:
+        p = cell.add_paragraph()
+        # Allow soft line breaks within a paragraph
+        lines = para_text.split("\n")
+        if not lines:
+            continue
+        # First line
+        run = p.add_run(lines[0])
+        # Remaining lines as soft breaks
+        for line in lines[1:]:
+            run.add_break()
+            p.add_run(line)
+
+# ───────────────────────── Excel parsing (same as your original behavior) ─────────────────────────
 
 def extract_prompt_answers_and_explanation(df_row):
     """Split df['Question'] at first 'A.'; explanation from df['Explanation']."""
@@ -107,7 +149,7 @@ def scan_word_document_version_a(word_file, excel_file, sheet_name, question_lim
         )
 
     def put_translation(row_obj, text):
-        row_obj.cells[col['translation']].text = text
+        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text)
 
     total_rows = len(table.rows)
     d(f"[A] Total table rows: {total_rows}")
@@ -205,7 +247,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
         )
 
     def put_translation(row_obj, text):
-        row_obj.cells[col['translation']].text = text
+        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text)
 
     total_rows = len(table.rows)
     d(f"[B] Total table rows: {total_rows}")
@@ -273,7 +315,7 @@ def scan_word_document_version_b(word_file, excel_file, sheet_name, question_lim
     out.seek(0)
     return out, f"Processed {q_count} question(s) [Version B] with sheet '{sheet_name}'."
 
-# ───────────────────────── Universal (anchor + configurable offsets; radio-only answers; duplicate prompt handling) ─────────────────────────
+# ───────────────────────── Universal (anchor + configurable offsets; duplicate prompt handling) ─────────────────────────
 
 def scan_word_document_universal(word_file,
                                  excel_file,
@@ -323,7 +365,7 @@ def scan_word_document_universal(word_file,
         )
 
     def put_translation(row_obj, text):
-        row_obj.cells[col['translation']].text = text
+        set_cell_text_preserve_paras(row_obj.cells[col['translation']], text)
 
     anchor_norm = _norm(anchor_type_value)
     d(f"[U] Anchor config: anchor_type_value='{anchor_type_value}', anchor_norm='{anchor_norm}', "
@@ -339,7 +381,7 @@ def scan_word_document_universal(word_file,
         return tnorm.startswith('radiobutton') and tnorm.endswith('normalstate')
 
     def find_block_end(start_idx: int) -> int:
-        """End is the next anchor (RB1 or configured anchor) after start_idx, else end of table."""
+        """End is the next anchor (configured anchor) after start_idx, else end of table."""
         k = start_idx + 1
         while k < total_rows:
             _, t_k, _, _ = get_vals(table.rows[k])
@@ -392,7 +434,8 @@ def scan_word_document_universal(word_file,
                     d(f"[U]   Dupe-check: type[prompt]='{t_prompt}'→'{t_prompt_norm}', "
                       f"type[next]='{t_next}'→'{t_next_norm}'")
                     if t_next_norm == t_prompt_norm:
-                        put_translation(table.rows[p_idx + 1], "")
+                        # Clear duplicate translation
+                        set_cell_text_preserve_paras(table.rows[p_idx + 1].cells[col['translation']], "")
                         local_bump = 1  # bump offsets for this block only
                         d(f"[U]   Cleared TRANSLATION at row {p_idx + 1} (duplicate prompt); "
                           f"applying +{local_bump} bump to answers/feedback in this block")
@@ -544,7 +587,7 @@ st.sidebar.caption("Presets are local JSON files. Upload to apply instantly. Use
 
 # ───────────────────────── Main UI ─────────────────────────
 
-st.title("Document Processor — Multi-Version (Debug + Dupe-Prompt Option & Bump)")
+st.title("Document Processor — Multi-Version (Debug + Dupe-Prompt Option & Paragraph Preservation)")
 
 # Version selector
 version_choice = st.selectbox(
